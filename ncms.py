@@ -1,8 +1,9 @@
 import os
-import requests
 from notion_client import Client
 from dotenv import load_dotenv
+
 load_dotenv()
+
 # Initialize Notion client
 notion = Client(auth=os.getenv('NOTION_API_KEY'))
 
