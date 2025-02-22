@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 load_dotenv()
 notion = Client(auth=os.getenv('NOTION_API_KEY'))
 database_id = os.getenv('NOTION_DATABASE_ID')  # e.g., 1a2bbfdb472980c38995c450e4f0d65e
+output_dir = os.getenv('OUTPUT_DIR')
 
 # Fetch database content
 def fetch_database_content(database_id):
@@ -31,7 +32,9 @@ def fetch_page_content(page_id):
         block_type = block['type']
         rich_text = block[block_type].get('rich_text', [])
         text = ''.join([t['plain_text'] for t in rich_text if 'plain_text' in t])
-        if block_type == 'heading_1':
+        if block_type == 'callout' and 'icon' in block['callout'] and block['callout']['icon']['type'] == 'emoji' and block['callout']['icon']['emoji'] == '🖼️':
+            content += f"<?php $alt='{text}'; require('../HTML/Fragment/Component_cover.php') ?>\n<h2 class='center'><?php echo $desc; ?></h2>\n"
+        elif block_type == 'heading_1':
             content += f"<h3>{text}</h3>\n"
         elif block_type == 'paragraph' and text:
             content += f"<p>{text}</p>\n"
@@ -66,7 +69,7 @@ def extract_fields(database_content):
             "status": properties["Status"]["select"]["name"] if properties["Status"].get("select") else "",
             "slug": slug,
             "label": get_rich_text("Label"),
-            "title": get_rich_text("Title"),  # Title is rich_text, not the page title
+            "title": get_rich_text("Title"),
             "js": properties["JS"]["select"]["name"] if properties["JS"].get("select") else "0",
             "description": get_rich_text("Description"),
             "content": fetch_page_content(page["id"])
@@ -78,7 +81,12 @@ def extract_fields(database_content):
 
 # Transform to PHP with correct directory structure
 def transform_to_php(articles):
-    output_dir = 'HTML/Component/'
+    if not output_dir:
+        print("Error: OUTPUT_DIR not set in .env, defaulting to 'HTML/Component/'")
+        output_base = '.'
+    else:
+        output_base = output_dir
+    output_base = os.path.join(output_base, 'HTML/Component/')
     written_dirs = set()  # Track written files to avoid overwriting
 
     for article in articles:
@@ -89,7 +97,7 @@ def transform_to_php(articles):
             category_path = article['title'].replace(' ', '_').lower()
             print(f"Warning: Empty Id for {article['title']}, using {category_path}")
 
-        full_output_dir = os.path.join(output_dir, category_path)
+        full_output_dir = os.path.join(output_base, category_path)
         print(f"Creating directory: {full_output_dir}")
 
         # Create directories
@@ -113,22 +121,19 @@ def transform_to_php(articles):
 
         # Generate PHP content
         js_include = "<?php require('../JS/Base/page.js'); ?>" if article['js'] == "1" else ""
-        php_code = f"""<?php
-$desc = "{article['description']}";
-?>
+        php_code = f"""
 <div id='message'>
-    <?php $alt='{article['title']}'; require('../HTML/Fragment/Component_cover.php') ?>
-    <h2 class='center'><?php echo $desc; ?></h2>
     {article['content']}
 </div>
 {js_include}
 <?php require('../HTML/Fragment/Component_bottom.php') ?>
+
 """
 
         print(f"Writing to: {full_file_path}")
         try:
             with open(full_file_path, 'w', encoding='utf-8') as f:
-                f.write(php_code)
+                f.write(php_code.strip())
         except Exception as e:
             print(f"Error writing to {full_file_path}: {e}")
 
