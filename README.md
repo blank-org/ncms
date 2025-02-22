@@ -1,6 +1,6 @@
 # Notion Content to PHP Script
 
-This script fetches content from a Notion page and transforms it into PHP code. It uses the Notion API to fetch the content and then processes it into files needed for the @blank-org/cutie framework.
+This script fetches content from a Notion page using the Notion API and transforms it into files needed for the @blank-org/cutie - framework.
 
 ## Requirements
 
