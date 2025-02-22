@@ -31,24 +31,25 @@ def fetch_page_content(page_id):
     for block in response['results']:
         block_type = block['type']
         rich_text = block[block_type].get('rich_text', [])
-        text = ''.join([t['plain_text'] for t in rich_text if 'plain_text' in t])
+        # Join rich text with <br> for newlines within the block
+        text = '<br>\n\t\t'.join([t['plain_text'] for t in rich_text if 'plain_text' in t])
         if block_type == 'callout' and 'icon' in block['callout'] and block['callout']['icon']['type'] == 'emoji' and block['callout']['icon']['emoji'] == '🖼️':
-            content += f"<?php $alt='{text}'; require('../HTML/Fragment/Component_cover.php') ?>\n<h2 class='center'><?php echo $desc; ?></h2>\n"
+            content += f"<?php $alt='{text}'; require('../HTML/Fragment/Component_cover.php') ?>\n\t<h2 class='center'><?php echo $desc; ?></h2>\n"
         elif block_type == 'heading_1':
-            content += f"<h3>{text}</h3>\n"
+            content += f"\t<h3>{text}</h3>\n"
         elif block_type == 'paragraph' and text:
-            content += f"<p>{text}</p>\n"
+            content += f"\t<p class='first-letter-high'>\n\t\t{text}\n\t</p>\n"
         elif block_type == 'bulleted_list_item':
-            content += f"<li><div>{text}</div></li>\n"
+            content += f"\t<li><div>{text}</div></li>\n"
         elif block_type == 'numbered_list_item':
-            content += f"<li><div>{text}</div></li>\n"
+            content += f"\t<li><div>{text}</div></li>\n"
         elif block_type == 'table':
-            content += "<table>\n"
+            content += "\t<table>\n"
             table_rows = notion.blocks.children.list(block_id=block['id'])['results']
             for row in table_rows:
                 cells = ''.join([f"<td>{''.join([t['plain_text'] for t in cell if 'plain_text' in t])}</td>" for cell in row['table_row']['cells']])
-                content += f"<tr>{cells}</tr>\n"
-            content += "</table>\n"
+                content += f"\t\t<tr>{cells}</tr>\n"
+            content += "\t</table>\n"
     return content
 
 # Extract fields with corrected slug handling
@@ -79,7 +80,7 @@ def extract_fields(database_content):
             print(f"Extracted article: Id={article['slug']}, Title={article['title']}")
     return articles
 
-# Transform to PHP with correct directory structure
+# Transform to PHP with correct directory structure and auto-indent
 def transform_to_php(articles):
     if not output_dir:
         print("Error: OUTPUT_DIR not set in .env, defaulting to 'HTML/Component/'")
@@ -119,21 +120,22 @@ def transform_to_php(articles):
 
         written_dirs.add(full_file_path)
 
-        # Generate PHP content
+        # Generate PHP content with auto-indentation using tabs
         js_include = "<?php require('../JS/Base/page.js'); ?>" if article['js'] == "1" else ""
-        php_code = f"""
-<div id='message'>
-    {article['content']}
-</div>
-{js_include}
-<?php require('../HTML/Fragment/Component_bottom.php') ?>
-
-"""
+        php_code_lines = [
+            "<div id='message'>",
+            f"\t{article['content']}",
+            "</div>",
+            js_include,
+            "<?php require('../HTML/Fragment/Component_bottom.php') ?>"
+        ]
+        # Join lines with proper indentation
+        php_code = '\n'.join(php_code_lines)
 
         print(f"Writing to: {full_file_path}")
         try:
             with open(full_file_path, 'w', encoding='utf-8') as f:
-                f.write(php_code.strip())
+                f.write(php_code)
         except Exception as e:
             print(f"Error writing to {full_file_path}: {e}")
 
