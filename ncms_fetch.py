@@ -166,6 +166,8 @@ def update_firebase_json(articles, output_base):
     firebase_data["hosting"]["redirects"] = redirects
     firebase_data["hosting"]["rewrites"] = rewrites
 
+    # if directory does not exist, create it
+    os.makedirs(os.path.dirname(firebase_json_path), exist_ok=True)
     with open(firebase_json_path, 'w', encoding='utf-8') as f:
         json.dump(firebase_data, f, indent=4)
     print(f"Updated {firebase_json_path}")
@@ -288,8 +290,10 @@ def transform_to_php(articles):
 def write_ids_tsv(articles):
     """Write all fields (Status, Id, Label, Title, JS, Description) to a TSV file.
     Updates the row if an entry with the same Id exists; otherwise, appends a new row.
-    The file is located at output/config/IDs.tsv."""
-    file_path = "output/config/IDs.tsv"
+    The file is located at output/config/ID.tsv."""
+    file_path = "output/config/ID.tsv"
+    # if directory does not exist, create it
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
     existing = {}
     if os.path.exists(file_path):
         with open(file_path, "r", encoding="utf-8") as f:

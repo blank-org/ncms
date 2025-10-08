@@ -1,7 +1,9 @@
 .venv/
 
 archive/
+output/
 
 .env
 
 *.php
+
