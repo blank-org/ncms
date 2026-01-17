@@ -194,19 +194,44 @@ def update_sitemap_xml(articles, output_base):
         f.write(urlset_start + ''.join(new_urls) + urlset_end)
     print(f"Updated {sitemap_xml_path} with {len(new_urls)} URLs")
 
+# Helper function for running git commands with error capture
+def _run_cmd(cmd, cwd):
+    return subprocess.run(cmd, cwd=cwd, text=True, capture_output=True)
+
 # Call push_git.sh equivalent
 def push_git(output_base):
     try:
-        subprocess.run(["git", "add", "-A"], cwd=output_base, check=True)
-        # subprocess.run(["git", "commit", "-m", f"Update articles from Notion - {subprocess.check_output(['date', '+%Y-%m-%d-%H-%M-%S']).decode().strip()}"], cwd=output_base, check=True)
+        # Stage all changes
+        result = _run_cmd(["git", "add", "-A"], cwd=output_base)
+        if result.returncode != 0:
+            print(f"Git add failed: {result.stderr}")
+            return False
+
+        # Check if there are staged changes
+        result = _run_cmd(["git", "diff", "--cached", "--quiet"], cwd=output_base)
+        if result.returncode == 0:
+            # No staged changes - nothing to commit
+            print("No changes to commit")
+            return True
+
+        # Commit staged changes
         timestamp = datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
         commit_message = f"Update articles from Notion - {timestamp}"
-        subprocess.run(["git", "commit", "-m", commit_message], cwd=output_base, check=True)
-        subprocess.run(["git", "push", "origin", "publish"], cwd=output_base, check=True)
+        result = _run_cmd(["git", "commit", "-m", commit_message], cwd=output_base)
+        if result.returncode != 0:
+            print(f"Git commit failed: {result.stderr}")
+            return False
+
+        # Push to remote
+        result = _run_cmd(["git", "push", "-u", "origin", "main"], cwd=output_base)
+        if result.returncode != 0:
+            print(f"Git push failed: {result.stderr}")
+            return False
+
         print("Git push successful")
         return True
-    except subprocess.CalledProcessError as e:
-        print(f"Git push failed: {e}")
+    except Exception as e:
+        print(f"Unexpected error during git operations: {e}")
         return False
 
 # Update Notion status to 'published'
