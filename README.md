@@ -65,7 +65,7 @@ These Notion blocks map directly to HTML output:
 
 | Notion Block | HTML Output |
 |---|---|
-| Paragraph | `<p class='first-letter-high'>...</p>` |
+| Paragraph | `<p>...</p>` |
 | Heading 1 | `<h3>...</h3>` |
 | Heading 2 | `<h2>...</h2>` |
 | Heading 3 | `<h4>...</h4>` |
@@ -95,6 +95,18 @@ Inline formatting from Notion is preserved in all text blocks:
 ### Callout Blocks (Emoji-tagged PHP Components)
 
 Callout blocks with specific emoji icons generate PHP component includes. The callout's text content provides parameters.
+
+#### First-letter high / drop cap — `🔠`
+
+Use this callout only when the author explicitly wants the paragraph's first letter enlarged. Rich-text formatting and links inside the callout are preserved.
+
+**Notion:** Callout with 🔠 icon containing the paragraph text
+**Output:**
+```html
+<p class='first-letter-high'>Author-selected paragraph...</p>
+```
+
+Ordinary Notion paragraphs generate plain `<p>` elements without this class. During website-to-Notion upload, only paragraphs already carrying `class='first-letter-high'` become 🔠 callouts.
 
 #### Cover Image — `🖼️`
 

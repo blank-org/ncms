@@ -6,15 +6,18 @@ import sys
 import unittest
 sys.stdout.reconfigure(encoding='utf-8')
 
+from bs4 import BeautifulSoup
+
 from ncms_fetch import render_rich_text, wrap_lists
 from ncms_fetch import (
     handle_paragraph, handle_heading_1, handle_heading_2, handle_heading_3,
     handle_bulleted_list_item, handle_numbered_list_item,
     handle_quote, handle_code, handle_divider,
     handle_callout, handle_cover_image, handle_content_image,
-    handle_link_xurl, handle_raw_php,
+    handle_link_xurl, handle_raw_php, handle_first_letter_high,
     extract_fields, update_id_tsv, update_translations_tsv, update_sitemap_xml,
 )
+from ncms_upload import element_to_rich_text, make_rich_text_callout
 
 passed = 0
 failed = 0
@@ -99,13 +102,28 @@ result = render_rich_text([
 check("Mixed segments", result, "Normal <strong>bold</strong> end")
 
 
+print("\n=== Website to Notion Rich Text ===")
+
+paragraph = BeautifulSoup("<p>Line one<br>\n\t\tLine two</p>", "html.parser").p
+upload_rich_text = element_to_rich_text(paragraph)
+upload_text = ''.join(item['text']['content'] for item in upload_rich_text)
+check("HTML indentation removed", upload_text, "Line one\nLine two")
+check("No doubled newline", str("\n\n" not in upload_text), "True")
+
+paragraph = BeautifulSoup("<p>Trailing break<br>\n\t</p>", "html.parser").p
+upload_rich_text = element_to_rich_text(paragraph)
+upload_text = ''.join(item['text']['content'] for item in upload_rich_text)
+check("Intentional trailing break retained", str(upload_text.endswith("\n")), "True")
+
+
 print("\n=== Block Handlers ===")
 
 # Paragraph
 block = {"paragraph": {"rich_text": [rt("Test paragraph")]}}
 btype, html = handle_paragraph(block, None)
 check("Paragraph type", btype, "paragraph")
-check("Paragraph html", html, "<p class='first-letter-high'>")
+check("Paragraph html", html, "<p>")
+check("Paragraph has no implicit drop cap", str("first-letter-high" not in html), "True")
 check("Paragraph content", html, "Test paragraph")
 
 # Empty paragraph
@@ -223,13 +241,28 @@ block = {"callout": {
 btype, html = handle_callout(block, None)
 check("Raw PHP", html, "<?php group_image('paths', 3, 'svg') ?>")
 
+# Explicit first-letter-high 🔠
+block = {"callout": {
+    "icon": {"type": "emoji", "emoji": "\U0001f520"},
+    "rich_text": [rt("Drop cap "), rt("paragraph", bold=True)]
+}}
+btype, html = handle_callout(block, None)
+check("Explicit drop cap class", html, "<p class='first-letter-high'>")
+check("Explicit drop cap rich text", html, "<strong>paragraph</strong>")
+
+upload_block = make_rich_text_callout("\U0001f520", [rt("Drop cap source", bold=True)])
+check("Upload drop cap callout type", upload_block['type'], "callout")
+check("Upload drop cap emoji", upload_block['callout']['icon']['emoji'], "\U0001f520")
+check("Upload drop cap preserves annotations", str(upload_block['callout']['rich_text'][0]['annotations']['bold']), "True")
+
 # Unknown callout (default to paragraph)
 block = {"callout": {
     "icon": {"type": "emoji", "emoji": "\u2764\ufe0f"},
     "rich_text": [rt("Some callout text")]
 }}
 btype, html = handle_callout(block, None)
-check("Unknown callout as paragraph", html, "<p class='first-letter-high'>")
+check("Unknown callout as paragraph", html, "<p>")
+check("Unknown callout has no drop cap", str("first-letter-high" not in html), "True")
 
 
 print("\n=== List Wrapping ===")

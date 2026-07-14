@@ -155,6 +155,12 @@ def element_to_rich_text(element):
 
         if isinstance(node, NavigableString):
             text = str(node)
+            # HTML source indentation is formatting, not article content. Keeping
+            # it next to a <br> produces doubled Notion newlines on round-trip.
+            text = re.sub(r'^[\r\n]+[ \t]*', '', text)
+            text = re.sub(r'[\r\n]+[ \t]*', ' ', text)
+            if not text.strip():
+                return
             # Check if this is a PHP marker
             if text.strip().startswith('%%PHP_'):
                 # This shouldn't happen in well-structured content
@@ -269,7 +275,9 @@ def clean_rich_text(rich_text):
     # Strip trailing whitespace from last segment
     if rich_text:
         last = rich_text[-1]['text']['content']
-        stripped = last.rstrip('\n\t ')
+        # Preserve newlines emitted by explicit <br> elements. Source-code
+        # indentation has already been removed while walking text nodes.
+        stripped = last.rstrip('\t ')
         if stripped:
             rich_text[-1] = {**rich_text[-1], 'text': {**rich_text[-1]['text'], 'content': stripped}}
         elif len(rich_text) > 1:
@@ -396,6 +404,20 @@ def make_callout(emoji, text):
         "type": "callout",
         "callout": {
             "rich_text": [{"type": "text", "text": {"content": text}}],
+            "icon": {"type": "emoji", "emoji": emoji}
+        }
+    }
+
+
+def make_rich_text_callout(emoji, rich_text):
+    """Create a semantic callout while preserving inline rich-text annotations."""
+    if not rich_text or is_rich_text_empty(rich_text):
+        return None
+    return {
+        "object": "block",
+        "type": "callout",
+        "callout": {
+            "rich_text": rich_text,
             "icon": {"type": "emoji", "emoji": emoji}
         }
     }
@@ -603,7 +625,11 @@ def parse_file_to_blocks(file_path):
         # Paragraph
         if tag == 'p':
             rt = element_to_rich_text(element)
-            block = make_paragraph(rt)
+            classes = element.get('class', [])
+            if 'first-letter-high' in classes:
+                block = make_rich_text_callout('🔠', rt)
+            else:
+                block = make_paragraph(rt)
             if block:
                 blocks.append(block)
             continue

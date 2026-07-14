@@ -102,7 +102,7 @@ def handle_paragraph(block, notion_client):
     rich_text = block['paragraph'].get('rich_text', [])
     text = render_rich_text(rich_text)
     if text:
-        return ('paragraph', f"\t<p class='first-letter-high'>\n\t\t{text}\n\t</p>\n")
+        return ('paragraph', f"\t<p>\n\t\t{text}\n\t</p>\n")
     return ('paragraph', '')
 
 def handle_heading_1(block, notion_client):
@@ -203,6 +203,13 @@ def handle_raw_php(block, rich_text):
     text = ''.join([t.get('plain_text', '') for t in rich_text])
     return ('callout', f"\t{text}\n")
 
+def handle_first_letter_high(block, rich_text):
+    """🔠 callout — render an author-selected paragraph with a drop cap."""
+    text = render_rich_text(rich_text)
+    if text:
+        return ('callout', f"\t<p class='first-letter-high'>\n\t\t{text}\n\t</p>\n")
+    return ('callout', '')
+
 def handle_callout(block, notion_client):
     icon = block['callout'].get('icon', {})
     emoji = icon.get('emoji', '') if icon.get('type') == 'emoji' else ''
@@ -210,10 +217,10 @@ def handle_callout(block, notion_client):
     handler = CALLOUT_HANDLERS.get(emoji)
     if handler:
         return handler(block, rich_text)
-    # Default: render callout as a paragraph
+    # Default: render an unrecognized callout as a normal paragraph.
     text = render_rich_text(rich_text)
     if text:
-        return ('callout', f"\t<p class='first-letter-high'>\n\t\t{text}\n\t</p>\n")
+        return ('callout', f"\t<p>\n\t\t{text}\n\t</p>\n")
     return ('callout', '')
 
 
@@ -222,6 +229,7 @@ CALLOUT_HANDLERS = {
     '🏞️': handle_content_image,
     '🔗': handle_link_xurl,
     '🔧': handle_raw_php,
+    '🔠': handle_first_letter_high,
 }
 
 BLOCK_HANDLERS = {
