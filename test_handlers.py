@@ -302,8 +302,11 @@ print("\n=== Language-Aware Config Generation ===")
 import os, tempfile, shutil
 
 # Helper to build mock articles with language fields
-def make_article(slug, language='en', status='published', label='', title='', js='0', desc=''):
-    return {
+def make_article(
+    slug, language='en', status='published', label='', title='', js='0',
+    desc='', flags=None, article_type='article'
+):
+    article = {
         'id': 'fake-id',
         'status': status,
         'slug': slug,
@@ -313,8 +316,12 @@ def make_article(slug, language='en', status='published', label='', title='', js
         'title': title or slug.split('/')[-1].capitalize(),
         'js': js,
         'description': desc or f'About {slug}',
+        'type': article_type,
         'content': '<p>Test</p>',
     }
+    if flags is not None:
+        article['flags'] = flags
+    return article
 
 # Test per-language ID.tsv generation
 tmpdir = tempfile.mkdtemp()
@@ -333,8 +340,11 @@ try:
         en_content = f.read()
     check("EN ID.tsv has life", en_content, "world/philosophy/life")
     check("EN ID.tsv has about", en_content, "about")
+    check("EN ID.tsv has Type header", en_content.splitlines()[0], "Type")
+    check("EN ID.tsv writes article Type", en_content, "article")
     # English file should NOT have Hindi entries
     check("EN ID.tsv no Hindi label", str('जीवन' not in en_content), "True")
+    check("EN ID.tsv omits absent Flags", str('Flags' not in en_content.splitlines()[0]), "True")
 
     # Check Hindi ID.tsv
     hi_path = os.path.join(tmpdir, 'Config/ID_hi.tsv')
@@ -354,6 +364,22 @@ try:
     check("Translations has life group", trans_content, "world/philosophy/life")
 finally:
     shutil.rmtree(tmpdir)
+
+# Test conditional Flags column generation
+tmpdir_flags = tempfile.mkdtemp()
+try:
+    articles = [
+        make_article('root', 'en', flags='external'),
+        make_article('about', 'en'),
+    ]
+    update_id_tsv(articles, tmpdir_flags)
+    flags_path = os.path.join(tmpdir_flags, 'Config/ID.tsv')
+    with open(flags_path, 'r', encoding='utf-8') as f:
+        flags_rows = f.read().splitlines()
+    check("ID.tsv includes present Flags", flags_rows[0], "Flags")
+    check("ID.tsv writes flag value", flags_rows[1], "external")
+finally:
+    shutil.rmtree(tmpdir_flags)
 
 # Test sitemap hreflang generation
 tmpdir2 = tempfile.mkdtemp()
@@ -392,6 +418,8 @@ mock_page_en = {
         'Title': {'rich_text': [{'plain_text': 'Test Article'}]},
         'JS': {'select': {'name': '0'}},
         'Description': {'rich_text': [{'plain_text': 'A test'}]},
+        'Type': {'select': {'name': 'article'}},
+        'Flags': {'multi_select': [{'name': 'external'}, {'name': 'featured'}]},
         'Language': {'select': {'name': 'en'}},
         'TranslationGroup': {'rich_text': [{'plain_text': 'test/article'}]},
     }
@@ -435,6 +463,8 @@ try:
     check("EN article found", str(len(en_article)), "1")
     check("EN article language", en_article[0]['language'], "en")
     check("EN article translation_group", en_article[0]['translation_group'], "test/article")
+    check("EN article type", en_article[0]['type'], "article")
+    check("EN article flags", en_article[0]['flags'], "external featured")
 
     hi_article = [a for a in articles if a.get('language') == 'hi']
     check("HI article found", str(len(hi_article)), "1")
@@ -442,6 +472,7 @@ try:
 
     no_lang_article = [a for a in articles if a['slug'] == 'legacy/article']
     check("No-lang defaults to en", no_lang_article[0]['language'], "en")
+    check("No Flags property stays absent", str('flags' not in no_lang_article[0]), "True")
 
     mock_page_test = dict(mock_page_en)
     mock_page_test['id'] = 'page-test-status'
