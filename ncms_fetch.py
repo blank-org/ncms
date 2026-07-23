@@ -319,6 +319,22 @@ def extract_fields(database_content, included_statuses=('publish',)):
             rich_text = prop.get('rich_text', [])
             return rich_text[0]['plain_text'] if rich_text else default
 
+        def get_flags():
+            prop = properties.get("Flags", {})
+            if prop.get("rich_text"):
+                return " ".join(
+                    item.get("plain_text", "") for item in prop["rich_text"]
+                    if item.get("plain_text")
+                )
+            if prop.get("select"):
+                return prop["select"].get("name", "")
+            if prop.get("multi_select"):
+                return " ".join(
+                    item.get("name", "") for item in prop["multi_select"]
+                    if item.get("name")
+                )
+            return ""
+
         slug = properties["Id"]["title"][0]["plain_text"] if properties["Id"].get("title") else ""
         language = "en"
         if properties.get("Language") and properties["Language"].get("select") and properties["Language"]["select"]:
@@ -346,8 +362,11 @@ def extract_fields(database_content, included_statuses=('publish',)):
             "title": get_rich_text("Title"),
             "js": properties["JS"]["select"]["name"] if properties["JS"].get("select") else "0",
             "description": get_rich_text("Description"),
+            "type": properties["Type"]["select"]["name"] if properties.get("Type", {}).get("select") else "",
             "content": fetch_page_content(page["id"])
         }
+        if "Flags" in properties:
+            article["flags"] = get_flags()
         articles.append(article)
         print(f"Extracted article: Id={article['slug']}, Title={article['title']}")
     return articles
@@ -365,22 +384,59 @@ def update_id_tsv(articles, output_base):
         id_tsv_path = os.path.join(output_base, f'Config/ID{suffix}.tsv')
         os.makedirs(os.path.dirname(id_tsv_path), exist_ok=True)
 
+        default_header = ['Status', 'Id', 'Label', 'Title', 'JS', 'Description', 'Type']
+        include_flags = any('flags' in article for article in lang_articles)
+
         # Read existing entries to detect updates
+        header = default_header
         existing_entries = {}
         if os.path.exists(id_tsv_path):
             with open(id_tsv_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    parts = line.strip().split('\t')
-                    if len(parts) >= 2:
-                        existing_entries[parts[1]] = line.strip()
+                rows = [line.rstrip('\r\n').split('\t') for line in f if line.strip()]
+            if rows and 'id' in [column.lower() for column in rows[0]]:
+                header = rows.pop(0)
+            id_index = next(
+                (i for i, column in enumerate(header) if column.lower() == 'id'),
+                1
+            )
+            include_flags = include_flags or any(
+                column.lower() == 'flags' for column in header
+            )
+            for row in rows:
+                if len(row) > id_index:
+                    existing_entries[row[id_index]] = row
+
+        if not any(column.lower() == 'type' for column in header):
+            header.append('Type')
+
+        if include_flags and not any(column.lower() == 'flags' for column in header):
+            header.append('Flags')
+
+        column_keys = [column.lower() for column in header]
+        article_keys = {
+            'status': 'status',
+            'id': 'slug',
+            'label': 'label',
+            'title': 'title',
+            'js': 'js',
+            'description': 'description',
+            'type': 'type',
+            'flags': 'flags',
+        }
 
         # Update or add new entries
+        for article in lang_articles:
+            row = []
+            for column in column_keys:
+                key = article_keys.get(column)
+                row.append(str(article.get(key, '')) if key else '')
+            existing_entries[article['slug']] = row
+
         with open(id_tsv_path, 'w', encoding='utf-8') as f:
-            for article in lang_articles:
-                line = f"{article['status']}\t{article['slug']}\t{article['label']}\t{article['title']}\t{article['js']}\t{article['description']}"
-                existing_entries[article['slug']] = line
-            for entry in existing_entries.values():
-                f.write(f"{entry}\n")
+            f.write('\t'.join(header) + '\n')
+            for row in existing_entries.values():
+                row = row + [''] * (len(header) - len(row))
+                f.write('\t'.join(row[:len(header)]) + '\n')
         print(f"Updated {id_tsv_path}")
 
     # Generate Translations.tsv cross-index
@@ -692,7 +748,7 @@ def transform_to_php(articles):
         print("Notion status update disabled (set NOTION_UPDATE=true to enable)")
 
 def write_ids_tsv(articles):
-    """Write all fields (Status, Id, Label, Title, JS, Description) to a TSV file.
+    """Write article metadata to a TSV file, including Flags when available.
     Updates the row if an entry with the same Id exists; otherwise, appends a new row.
     The file is located at output/config/ID.tsv."""
     file_path = "output/config/ID.tsv"
@@ -709,13 +765,24 @@ def write_ids_tsv(articles):
                     if len(fields) >= 2:
                         # Assuming the second column (Id) is the path id
                         existing[fields[1]] = fields
-    header_line = "Status\tId\tLabel\tTitle\tJS\tDescription\n"
+    include_flags = any("flags" in article for article in articles)
+    header = ["Status", "Id", "Label", "Title", "JS", "Description", "Type"]
+    if include_flags:
+        header.append("Flags")
     for article in articles:
-        existing[article["id"]] = [article["status"], article["id"], article["label"], article["title"], article["js"], article["description"]]
+        row = [
+            article["status"], article["slug"], article["label"],
+            article["title"], article["js"], article["description"],
+            article.get("type", "")
+        ]
+        if include_flags:
+            row.append(article.get("flags", ""))
+        existing[article["slug"]] = row
     with open(file_path, "w", encoding="utf-8") as f:
-        f.write(header_line)
+        f.write("\t".join(header) + "\n")
         for row in existing.values():
-            f.write("\t".join(row) + "\n")
+            row = row + [""] * (len(header) - len(row))
+            f.write("\t".join(row[:len(header)]) + "\n")
 
 def main():
     if not database_id:
