@@ -171,3 +171,31 @@ Run the isolated live verification against the Notion page whose Id is `test/ncm
 ```
 
 The live verifier writes to a new temporary directory. It forcibly disables git push and Notion status updates, checks all expected generated artifacts, and confirms that the PHP example inside the Notion code block is emitted as display text rather than executable PHP.
+
+## CI publication commands
+
+Render exactly one `Status=publish` page into an isolated bundle:
+
+```bash
+python ncms_fetch.py publish \
+  --bundle-dir /tmp/ncms-bundle \
+  --metadata-file /tmp/ncms-article.json
+```
+
+When more than one page is queued, pass `--slug world/philosophy/example`.
+Scheduled polling may pass `--allow-empty`, which turns an empty queue into a
+successful no-op. Multiple queued pages remain an error.
+
+The publish command always disables NCMS git pushes and Notion updates. After the
+generated article has been deployed and independently verified, mark the same page
+published with:
+
+```bash
+python ncms_fetch.py mark-published \
+  --page-id NOTION_PAGE_ID \
+  --expected-slug world/philosophy/example
+```
+
+`mark-published` re-fetches the page, verifies its slug and current status, applies
+the update, and verifies the final status. It refuses any status other than
+`publish` or the already-idempotent `published` state.
