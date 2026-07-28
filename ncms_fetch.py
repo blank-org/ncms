@@ -1,5 +1,8 @@
+import argparse
 import json
 import os
+import re
+import sys
 from html import escape
 from notion_client import Client
 from dotenv import load_dotenv
@@ -15,6 +18,8 @@ output_dir = os.getenv('OUTPUT_DIR')
 project_dir = os.getenv('PROJECT_DIR')
 git_push_enabled = os.getenv('GIT_PUSH', 'false').lower() == 'true'
 notion_update_enabled = os.getenv('NOTION_UPDATE', 'false').lower() == 'true'
+
+SAFE_SLUG_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_./-]*$')
 
 # Fetch database content
 def fetch_database_content(database_id, status='publish'):
@@ -784,15 +789,192 @@ def write_ids_tsv(articles):
             row = row + [""] * (len(header) - len(row))
             f.write("\t".join(row[:len(header)]) + "\n")
 
-def main():
+def page_slug(page):
+    title = page.get("properties", {}).get("Id", {}).get("title", [])
+    return title[0].get("plain_text", "") if title else ""
+
+
+def validate_slug(slug):
+    if (
+        not slug
+        or slug.startswith("/")
+        or slug.endswith("/")
+        or "\\" in slug
+        or any(part in {".", ".."} for part in slug.split("/"))
+        or not SAFE_SLUG_PATTERN.fullmatch(slug)
+    ):
+        raise ValueError(f"Unsafe article slug: {slug!r}")
+    return slug
+
+
+def select_publish_page(pages, requested_slug=None):
+    candidates = [{"slug": page_slug(page), "page_id": page["id"]} for page in pages]
+    if requested_slug:
+        validate_slug(requested_slug)
+        selected = [page for page in pages if page_slug(page) == requested_slug]
+        if len(selected) != 1:
+            raise RuntimeError(
+                f"Expected one publish page for {requested_slug!r}; found {len(selected)}. "
+                f"Queued: {[item['slug'] for item in candidates]}"
+            )
+        return selected[0], candidates
+
+    if len(pages) != 1:
+        raise RuntimeError(
+            "Expected exactly one page with Status=publish. "
+            f"Found {len(pages)}: {[item['slug'] for item in candidates]}. "
+            "Pass --slug to select one explicitly."
+        )
+    validate_slug(page_slug(pages[0]))
+    return pages[0], candidates
+
+
+def publish_to_bundle(status, slug, bundle_dir, metadata_file, allow_empty=False):
+    global output_dir, project_dir, git_push_enabled, notion_update_enabled
+
+    if not database_id:
+        raise RuntimeError("NOTION_DATABASE_ID is not set")
+
+    bundle_dir = os.path.abspath(bundle_dir)
+    metadata_file = os.path.abspath(metadata_file)
+    os.makedirs(bundle_dir, exist_ok=True)
+    os.makedirs(os.path.dirname(metadata_file), exist_ok=True)
+
+    pages = fetch_database_content(database_id, status=status)
+    if not pages and allow_empty:
+        metadata = {"no_work": True, "queued_slugs": []}
+        with open(metadata_file, "w", encoding="utf-8", newline="\n") as target:
+            json.dump(metadata, target, ensure_ascii=False, indent=2)
+            target.write("\n")
+        print("No queued Notion pages found")
+        return metadata
+
+    selected, candidates = select_publish_page(pages, slug)
+
+    output_dir = bundle_dir
+    project_dir = bundle_dir
+    git_push_enabled = False
+    notion_update_enabled = False
+
+    articles = extract_fields([selected], included_statuses=(status,))
+    if len(articles) != 1:
+        raise RuntimeError(f"Expected one extracted article; got {len(articles)}")
+
+    transform_to_php(articles)
+    article = articles[0]
+    language = article.get("language", "en")
+    component_parts = ["HTML", "Component"]
+    if language != "en":
+        component_parts.append(language)
+    component_parts.extend(article["slug"].split("/"))
+    component_parts.append("index.php")
+    component_path = os.path.join(bundle_dir, *component_parts)
+    if not os.path.isfile(component_path) or os.path.getsize(component_path) == 0:
+        raise RuntimeError(f"Generated component is missing or empty: {component_path}")
+
+    metadata = {
+        "page_id": article["id"],
+        "slug": article["slug"],
+        "title": article["title"],
+        "description": article["description"],
+        "language": language,
+        "component": os.path.relpath(component_path, bundle_dir).replace("\\", "/"),
+        "queued_slugs": [item["slug"] for item in candidates],
+    }
+    with open(metadata_file, "w", encoding="utf-8", newline="\n") as target:
+        json.dump(metadata, target, ensure_ascii=False, indent=2)
+        target.write("\n")
+
+    print("NCMS_RESULT=" + json.dumps(metadata, ensure_ascii=False))
+    return metadata
+
+
+def mark_published(page_id, expected_slug):
+    validate_slug(expected_slug)
+    page = notion.pages.retrieve(page_id=page_id)
+    actual_slug = page_slug(page)
+    if actual_slug != expected_slug:
+        raise RuntimeError(
+            f"Notion page slug changed: expected {expected_slug!r}, got {actual_slug!r}"
+        )
+
+    status_property = page.get("properties", {}).get("Status", {}).get("select")
+    status_name = status_property.get("name") if status_property else ""
+    if status_name not in {"publish", "published"}:
+        raise RuntimeError(f"Refusing to update unexpected status {status_name!r}")
+
+    if status_name != "published":
+        notion.pages.update(
+            page_id=page_id,
+            properties={"Status": {"select": {"name": "published"}}},
+        )
+
+    check = notion.pages.retrieve(page_id=page_id)
+    final_status = (
+        check.get("properties", {})
+        .get("Status", {})
+        .get("select", {})
+        .get("name", "")
+    )
+    if final_status != "published":
+        raise RuntimeError(f"Unexpected final status: {final_status!r}")
+    print(f"{expected_slug} status={final_status}")
+
+
+def legacy_main():
     if not database_id:
         print("Error: NOTION_DATABASE_ID not set in .env")
-        return
+        return 1
     database_content = fetch_database_content(database_id)
     articles = extract_fields(database_content)
     write_ids_tsv(articles)
     transform_to_php(articles)
     print(f"Processed {len(articles)} articles")
+    return 0
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(description="Publish Notion content through NCMS")
+    subparsers = parser.add_subparsers(dest="command")
+
+    publish_parser = subparsers.add_parser(
+        "publish",
+        help="Render exactly one queued Notion page into an isolated bundle",
+    )
+    publish_parser.add_argument("--status", default="publish")
+    publish_parser.add_argument("--slug")
+    publish_parser.add_argument("--allow-empty", action="store_true")
+    publish_parser.add_argument("--bundle-dir", required=True)
+    publish_parser.add_argument("--metadata-file", required=True)
+
+    mark_parser = subparsers.add_parser(
+        "mark-published",
+        help="Mark a verified Notion page as published",
+    )
+    mark_parser.add_argument("--page-id", required=True)
+    mark_parser.add_argument("--expected-slug", required=True)
+    return parser
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    if args.command == "publish":
+        publish_to_bundle(
+            status=args.status,
+            slug=args.slug,
+            bundle_dir=args.bundle_dir,
+            metadata_file=args.metadata_file,
+            allow_empty=args.allow_empty,
+        )
+        return 0
+    if args.command == "mark-published":
+        mark_published(args.page_id, args.expected_slug)
+        return 0
+    return legacy_main()
 
 if __name__ == "__main__":
-    main()
+    try:
+        sys.exit(main())
+    except Exception as error:
+        print(f"NCMS error: {error}", file=sys.stderr)
+        sys.exit(1)
