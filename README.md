@@ -57,6 +57,32 @@ Each page in the Notion database requires these properties:
 | `JS` | Select | `0` or `1` — loads `page.js` if `1` |
 | `Description` | Rich text | Page description for meta tags |
 
+## Nested translations
+
+The database contains exactly one canonical row per article slug. English content
+and all shared properties stay on that base page. Do not add Language or
+TranslationGroup database properties, and do not create a separate database row
+for a translation.
+
+Create each translation as a direct child page inside the canonical article. Name
+it <language name> (<code>), for example हिन्दी (hi). Its first block must be a
+🌐 callout with one field per line:
+
+    Language: hi
+    Label: छोटा नेविगेशन लेबल
+    Title: स्थानीयकृत पृष्ठ शीर्षक
+    Description: स्थानीयकृत मेटा विवरण
+
+The remaining child-page blocks are the translated article body. Language, Label,
+Title, and Description are publication metadata and the 🌐 callout is not rendered
+as body content.
+
+Queue only the canonical database row by setting its status to publish. NCMS
+discovers all recognized translation child pages and emits the English base plus
+every translation in one bundle. The publisher must deploy and verify that bundle
+atomically; a malformed translation causes the whole publication to fail.
+
+
 ## Block Type Mapping
 
 ### Standard Notion Blocks

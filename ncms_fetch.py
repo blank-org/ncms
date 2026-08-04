@@ -20,6 +20,9 @@ git_push_enabled = os.getenv('GIT_PUSH', 'false').lower() == 'true'
 notion_update_enabled = os.getenv('NOTION_UPDATE', 'false').lower() == 'true'
 
 SAFE_SLUG_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_./-]*$')
+NESTED_TRANSLATION_TITLE_PATTERN = re.compile(
+    r'^.+\(([A-Za-z]{2,3}(?:-[A-Za-z]{2})?)\)\s*$'
+)
 
 # Fetch database content
 def fetch_database_content(database_id, status='publish'):
@@ -292,8 +295,8 @@ def wrap_lists(block_tuples):
 
 
 # Fetch page content blocks with pagination
-def fetch_page_content(page_id):
-    block_tuples = []
+def fetch_page_blocks(page_id):
+    blocks = []
     has_more = True
     start_cursor = None
     while has_more:
@@ -301,17 +304,115 @@ def fetch_page_content(page_id):
         if start_cursor:
             kwargs['start_cursor'] = start_cursor
         response = notion.blocks.children.list(**kwargs)
-        for block in response['results']:
-            block_type = block['type']
-            handler = BLOCK_HANDLERS.get(block_type)
-            if handler:
-                result = handler(block, notion)
-                if result[1]:
-                    block_tuples.append(result)
+        blocks.extend(response.get('results', []))
         has_more = response.get('has_more', False)
         start_cursor = response.get('next_cursor')
+    return blocks
+
+
+def translation_language_from_title(title):
+    match = NESTED_TRANSLATION_TITLE_PATTERN.fullmatch((title or '').strip())
+    return match.group(1).lower() if match else None
+
+
+def plain_rich_text(rich_text):
+    return ''.join(item.get('plain_text', '') for item in rich_text)
+
+
+def parse_translation_metadata(blocks, expected_language):
+    for block in blocks:
+        if block.get('type') != 'callout':
+            continue
+        callout = block.get('callout', {})
+        icon = callout.get('icon', {})
+        if icon.get('type') != 'emoji' or icon.get('emoji') != '🌐':
+            continue
+        text = plain_rich_text(callout.get('rich_text', []))
+        fields = {}
+        for line in text.replace('<br>', '\n').splitlines():
+            if ':' not in line:
+                continue
+            key, value = line.split(':', 1)
+            fields[key.strip().lower()] = value.strip()
+        language = fields.get('language', '').lower()
+        if language != expected_language:
+            raise RuntimeError(
+                f"Nested translation language mismatch: title={expected_language!r}, "
+                f"metadata={language!r}"
+            )
+        required = ('label', 'title', 'description')
+        missing = [key for key in required if not fields.get(key)]
+        if missing:
+            raise RuntimeError(
+                f"Nested translation {language!r} is missing metadata: {missing}"
+            )
+        return {
+            'language': language,
+            'label': fields['label'],
+            'title': fields['title'],
+            'description': fields['description'],
+            'metadata_block_id': block.get('id'),
+        }
+    raise RuntimeError(
+        f"Nested translation {expected_language!r} is missing its 🌐 metadata callout"
+    )
+
+
+def render_page_blocks(blocks, skip_block_ids=()):
+    block_tuples = []
+    skip_block_ids = set(skip_block_ids)
+    for block in blocks:
+        if block.get('id') in skip_block_ids:
+            continue
+        block_type = block['type']
+        handler = BLOCK_HANDLERS.get(block_type)
+        if handler:
+            result = handler(block, notion)
+            if result[1]:
+                block_tuples.append(result)
     return wrap_lists(block_tuples)
 
+
+def fetch_page_content(page_id):
+    return render_page_blocks(fetch_page_blocks(page_id))
+
+
+def extract_nested_translations(page_blocks, base_article):
+    translations = []
+    seen_languages = set()
+    for block in page_blocks:
+        if block.get('type') != 'child_page':
+            continue
+        title = block.get('child_page', {}).get('title', '')
+        language = translation_language_from_title(title)
+        if not language:
+            continue
+        if language == 'en':
+            raise RuntimeError('English must remain on the base database page')
+        if language in seen_languages:
+            raise RuntimeError(
+                f"Duplicate nested translation {language!r} for {base_article['slug']}"
+            )
+        child_blocks = fetch_page_blocks(block['id'])
+        metadata = parse_translation_metadata(child_blocks, language)
+        translations.append({
+            'id': block['id'],
+            'status': base_article['status'],
+            'slug': base_article['slug'],
+            'language': language,
+            'translation_group': base_article['slug'],
+            'label': metadata['label'],
+            'title': metadata['title'],
+            'js': base_article['js'],
+            'description': metadata['description'],
+            'type': base_article['type'],
+            'content': render_page_blocks(
+                child_blocks,
+                skip_block_ids=(metadata['metadata_block_id'],),
+            ),
+        })
+        seen_languages.add(language)
+    return translations
 # Extract fields with corrected slug handling
 def extract_fields(database_content, included_statuses=('publish',)):
     """Extract articles whose status is explicitly allowed by the caller."""
@@ -357,6 +458,7 @@ def extract_fields(database_content, included_statuses=('publish',)):
                 print(f"Unknown status '{status}' for Id={slug}")
             continue
 
+        page_blocks = fetch_page_blocks(page["id"])
         article = {
             "id": page["id"],
             "status": status,
@@ -368,12 +470,19 @@ def extract_fields(database_content, included_statuses=('publish',)):
             "js": properties["JS"]["select"]["name"] if properties["JS"].get("select") else "0",
             "description": get_rich_text("Description"),
             "type": properties["Type"]["select"]["name"] if properties.get("Type", {}).get("select") else "",
-            "content": fetch_page_content(page["id"])
+            "content": render_page_blocks(page_blocks)
         }
         if "Flags" in properties:
             article["flags"] = get_flags()
         articles.append(article)
+        translations = extract_nested_translations(page_blocks, article)
+        articles.extend(translations)
         print(f"Extracted article: Id={article['slug']}, Title={article['title']}")
+        for translation in translations:
+            print(
+                f"Extracted nested translation: Id={translation['slug']}, "
+                f"Language={translation['language']}, Title={translation['title']}"
+            )
     return articles
 
 # Update ID.tsv with overwrite for existing entries (per-language files)
@@ -857,35 +966,53 @@ def publish_to_bundle(status, slug, bundle_dir, metadata_file, allow_empty=False
     notion_update_enabled = False
 
     articles = extract_fields([selected], included_statuses=(status,))
-    if len(articles) != 1:
-        raise RuntimeError(f"Expected one extracted article; got {len(articles)}")
+    if not articles:
+        raise RuntimeError("Expected at least one extracted article")
+    base_articles = [
+        article for article in articles if article.get("language", "en") == "en"
+    ]
+    if len(base_articles) != 1:
+        raise RuntimeError(
+            f"Expected one English base article; got {len(base_articles)}"
+        )
 
     transform_to_php(articles)
-    article = articles[0]
-    language = article.get("language", "en")
-    component_parts = ["HTML", "Component"]
-    if language != "en":
-        component_parts.append(language)
-    component_parts.extend(article["slug"].split("/"))
-    component_parts.append("index.php")
-    component_path = os.path.join(bundle_dir, *component_parts)
-    if not os.path.isfile(component_path) or os.path.getsize(component_path) == 0:
-        raise RuntimeError(f"Generated component is missing or empty: {component_path}")
+    variants = []
+    for article in articles:
+        language = article.get("language", "en")
+        component_parts = ["HTML", "Component"]
+        if language != "en":
+            component_parts.append(language)
+        component_parts.extend(article["slug"].split("/"))
+        component_parts.append("index.php")
+        component_path = os.path.join(bundle_dir, *component_parts)
+        if not os.path.isfile(component_path) or os.path.getsize(component_path) == 0:
+            raise RuntimeError(
+                f"Generated component is missing or empty: {component_path}"
+            )
+        variants.append({
+            "slug": article["slug"],
+            "title": article["title"],
+            "description": article["description"],
+            "language": language,
+            "component": os.path.relpath(component_path, bundle_dir).replace("\\", "/"),
+        })
 
+    base_article = base_articles[0]
+    base_variant = next(
+        variant for variant in variants if variant["language"] == "en"
+    )
     metadata = {
-        "page_id": article["id"],
-        "slug": article["slug"],
-        "title": article["title"],
-        "description": article["description"],
-        "language": language,
-        "component": os.path.relpath(component_path, bundle_dir).replace("\\", "/"),
+        "page_id": base_article["id"],
+        **base_variant,
+        "variants": variants,
         "queued_slugs": [item["slug"] for item in candidates],
     }
     with open(metadata_file, "w", encoding="utf-8", newline="\n") as target:
         json.dump(metadata, target, ensure_ascii=False, indent=2)
         target.write("\n")
 
-    print("NCMS_RESULT=" + json.dumps(metadata, ensure_ascii=False))
+    print("NCMS_RESULT=" + json.dumps(metadata, ensure_ascii=True))
     return metadata
 
 

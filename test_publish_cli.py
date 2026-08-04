@@ -74,8 +74,73 @@ class PublishBundleTests(unittest.TestCase):
                 metadata = json.load(source)
             self.assertEqual("world/example", result["slug"])
             self.assertEqual(result, metadata)
+            self.assertEqual(["en"], [item["language"] for item in metadata["variants"]])
             self.assertFalse(ncms_fetch.git_push_enabled)
             self.assertFalse(ncms_fetch.notion_update_enabled)
+
+    def test_bundle_contains_base_and_nested_translation_variants(self):
+        base = {
+            "id": "page-1",
+            "status": "publish",
+            "slug": "world/example",
+            "title": "Example",
+            "description": "Description",
+            "language": "en",
+        }
+        hindi = {
+            "id": "child-hi",
+            "status": "publish",
+            "slug": "world/example",
+            "title": "हिंदी उदाहरण",
+            "description": "हिंदी विवरण",
+            "language": "hi",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            metadata_path = os.path.join(temp_dir, "metadata.json")
+
+            def fake_transform(articles):
+                for article in articles:
+                    parts = [temp_dir, "HTML", "Component"]
+                    if article["language"] != "en":
+                        parts.append(article["language"])
+                    parts.extend(["world", "example", "index.php"])
+                    component = os.path.join(*parts)
+                    os.makedirs(os.path.dirname(component), exist_ok=True)
+                    with open(component, "w", encoding="utf-8") as target:
+                        target.write(f"<p>{article['title']}</p>")
+
+            with (
+                patch.object(ncms_fetch, "database_id", "database"),
+                patch.object(
+                    ncms_fetch,
+                    "fetch_database_content",
+                    return_value=[make_page("world/example")],
+                ),
+                patch.object(
+                    ncms_fetch,
+                    "extract_fields",
+                    return_value=[base, hindi],
+                ),
+                patch.object(
+                    ncms_fetch,
+                    "transform_to_php",
+                    side_effect=fake_transform,
+                ),
+            ):
+                metadata = ncms_fetch.publish_to_bundle(
+                    "publish", None, temp_dir, metadata_path
+                )
+
+            self.assertEqual(
+                ["en", "hi"],
+                [variant["language"] for variant in metadata["variants"]],
+            )
+            self.assertEqual(
+                "HTML/Component/hi/world/example/index.php",
+                metadata["variants"][1]["component"],
+            )
+            self.assertEqual("page-1", metadata["page_id"])
+
 
     def test_empty_scheduled_queue_is_a_no_op(self):
         with tempfile.TemporaryDirectory() as temp_dir:
