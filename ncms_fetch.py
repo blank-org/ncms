@@ -656,6 +656,25 @@ def update_firebase_json(articles, output_base):
     # Overwrite redirects and rewrites
     redirects = []
     rewrites = []
+    translated_languages = {
+        article.get('language', 'en')
+        for article in articles
+        if article.get('language', 'en') != 'en'
+    }
+
+    config_dir = os.path.join(output_base, 'Config')
+    if os.path.isdir(config_dir):
+        for filename in os.listdir(config_dir):
+            match = re.fullmatch(r'ID_([A-Za-z]{2,3}(?:-[A-Za-z]{2})?)\.tsv', filename)
+            if match:
+                translated_languages.add(match.group(1).lower())
+
+    for lang in sorted(translated_languages):
+        rewrites.append({
+            "source": f"/{lang}/menu",
+            "destination": f"/{lang}/root/index.html"
+        })
+
     for article in articles:
         slug = article['slug']
         lang = article.get('language', 'en')
