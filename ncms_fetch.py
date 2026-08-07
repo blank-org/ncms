@@ -20,6 +20,7 @@ git_push_enabled = os.getenv('GIT_PUSH', 'false').lower() == 'true'
 notion_update_enabled = os.getenv('NOTION_UPDATE', 'false').lower() == 'true'
 
 SAFE_SLUG_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_./-]*$')
+LANGUAGE_PREFIX_PATTERN = re.compile(r'^[a-z]{2,3}(?:-[a-z]{2})?$')
 NESTED_TRANSLATION_TITLE_PATTERN = re.compile(
     r'^.+\(([A-Za-z]{2,3}(?:-[A-Za-z]{2})?)\)\s*$'
 )
@@ -935,17 +936,42 @@ def validate_slug(slug):
     return slug
 
 
+def parse_publish_target(requested_slug, candidate_slugs=()):
+    """Resolve a publish request into (base_slug, language_or_None).
+
+    Public translation URLs use a language prefix (for example
+    ``hi/world/philosophy/hindu``). Notion page Ids stay unprefixed. Prefer an
+    exact Id match when the request equals a queued slug so article Ids that
+    look like ``faq/...`` are not treated as language prefixes.
+    """
+    requested_slug = validate_slug(requested_slug)
+    candidate_slugs = set(candidate_slugs)
+    if requested_slug in candidate_slugs:
+        return requested_slug, None
+    parts = requested_slug.split("/", 1)
+    if len(parts) == 2:
+        language, remainder = parts[0].lower(), parts[1]
+        if LANGUAGE_PREFIX_PATTERN.fullmatch(language):
+            validate_slug(remainder)
+            if not candidate_slugs or remainder in candidate_slugs:
+                return remainder, language
+    return requested_slug, None
+
+
 def select_publish_page(pages, requested_slug=None):
     candidates = [{"slug": page_slug(page), "page_id": page["id"]} for page in pages]
     if requested_slug:
-        validate_slug(requested_slug)
-        selected = [page for page in pages if page_slug(page) == requested_slug]
+        base_slug, language = parse_publish_target(
+            requested_slug,
+            [item["slug"] for item in candidates],
+        )
+        selected = [page for page in pages if page_slug(page) == base_slug]
         if len(selected) != 1:
             raise RuntimeError(
                 f"Expected one publish page for {requested_slug!r}; found {len(selected)}. "
                 f"Queued: {[item['slug'] for item in candidates]}"
             )
-        return selected[0], candidates
+        return selected[0], candidates, language
 
     if len(pages) != 1:
         raise RuntimeError(
@@ -954,7 +980,7 @@ def select_publish_page(pages, requested_slug=None):
             "Pass --slug to select one explicitly."
         )
     validate_slug(page_slug(pages[0]))
-    return pages[0], candidates
+    return pages[0], candidates, None
 
 
 def publish_to_bundle(status, slug, bundle_dir, metadata_file, allow_empty=False):
@@ -977,7 +1003,7 @@ def publish_to_bundle(status, slug, bundle_dir, metadata_file, allow_empty=False
         print("No queued Notion pages found")
         return metadata
 
-    selected, candidates = select_publish_page(pages, slug)
+    selected, candidates, requested_language = select_publish_page(pages, slug)
 
     output_dir = bundle_dir
     project_dir = bundle_dir
@@ -994,6 +1020,18 @@ def publish_to_bundle(status, slug, bundle_dir, metadata_file, allow_empty=False
         raise RuntimeError(
             f"Expected one English base article; got {len(base_articles)}"
         )
+    base_article = base_articles[0]
+
+    if requested_language:
+        articles = [
+            article
+            for article in articles
+            if article.get("language", "en") == requested_language
+        ]
+        if not articles:
+            raise RuntimeError(
+                f"No {requested_language!r} translation for {base_article['slug']!r}"
+            )
 
     transform_to_php(articles)
     variants = []
@@ -1017,16 +1055,20 @@ def publish_to_bundle(status, slug, bundle_dir, metadata_file, allow_empty=False
             "component": os.path.relpath(component_path, bundle_dir).replace("\\", "/"),
         })
 
-    base_article = base_articles[0]
-    base_variant = next(
-        variant for variant in variants if variant["language"] == "en"
-    )
+    primary_variant = variants[0]
     metadata = {
         "page_id": base_article["id"],
-        **base_variant,
+        "slug": base_article["slug"],
+        "title": primary_variant["title"],
+        "description": primary_variant["description"],
+        "language": primary_variant["language"],
+        "component": primary_variant["component"],
         "variants": variants,
         "queued_slugs": [item["slug"] for item in candidates],
     }
+    if requested_language:
+        metadata["requested_language"] = requested_language
+        metadata["translation_merge"] = True
     with open(metadata_file, "w", encoding="utf-8", newline="\n") as target:
         json.dump(metadata, target, ensure_ascii=False, indent=2)
         target.write("\n")

@@ -82,6 +82,12 @@ discovers all recognized translation child pages and emits the English base plus
 every translation in one bundle. The publisher must deploy and verify that bundle
 atomically; a malformed translation causes the whole publication to fail.
 
+To publish one language only, pass a language-prefixed public slug such as
+``--slug hi/world/philosophy/hindu``. NCMS still selects the canonical Notion
+page by its unprefixed Id, then emits only that language's variant. The
+publisher merges the translation into ``Translations.tsv`` without clearing
+other languages.
+
 
 ## Block Type Mapping
 
