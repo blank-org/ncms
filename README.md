@@ -161,6 +161,24 @@ Generates an inline content image. Text format: `img_title|ext|alt|center`
 <?php $img_title='paths'; $ext='svg'; $alt=''; $center='true'; require('Fragment/Component_image.php') ?>
 ```
 
+#### Two-way image synchronization
+
+Image callouts are the durable rendering metadata; image blocks are the visible
+Notion copy of the same asset.
+
+- **Notion to website:** publication downloads the first Notion image block as
+  the article cover, stores it under `Resource/<slug>/index.jpg`, injects the
+  cover component, and commits the source asset with the article.
+- **Website to Notion:** `ncms_upload.py` pairs an existing cover callout with
+  an image block using the canonical `https://ujnotes.com/<slug>.jpg` URL. It
+  also pairs each content-image callout with its existing
+  `https://ujnotes.com/<slug>/<img_title>.<ext>` asset.
+
+The semantic callout and visible image block must stay together. NCMS renders
+the callout and intentionally ignores the paired image block, preventing a
+duplicate image on the website. Missing local assets do not produce broken
+Notion image blocks.
+
 #### Link XURL — `🔗`
 
 Generates PHP `link_xurl()` calls. One link per line, format: `path|label`

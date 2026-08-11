@@ -4,6 +4,8 @@ Simulates Notion API responses locally — no API calls needed.
 """
 import sys
 import unittest
+import tempfile
+from pathlib import Path
 sys.stdout.reconfigure(encoding='utf-8')
 
 from bs4 import BeautifulSoup
@@ -17,7 +19,10 @@ from ncms_fetch import (
     handle_link_xurl, handle_raw_php, handle_first_letter_high,
     extract_fields, update_id_tsv, update_translations_tsv, update_sitemap_xml,
 )
-from ncms_upload import element_to_rich_text, make_rich_text_callout
+from ncms_upload import (
+    add_resource_image_blocks, element_to_rich_text, make_callout,
+    make_rich_text_callout,
+)
 
 passed = 0
 failed = 0
@@ -255,6 +260,44 @@ check("Upload drop cap callout type", upload_block['type'], "callout")
 check("Upload drop cap emoji", upload_block['callout']['icon']['emoji'], "\U0001f520")
 check("Upload drop cap preserves annotations", str(upload_block['callout']['rich_text'][0]['annotations']['bold']), "True")
 
+with tempfile.TemporaryDirectory() as temp_dir:
+    resource = Path(temp_dir)
+    cover = resource / 'world/philosophy/example/index.jpg'
+    cover.parent.mkdir(parents=True)
+    cover.write_bytes(b'cover')
+    inline = resource / 'world/philosophy/example/diagram.svg'
+    inline.write_text('<svg/>', encoding='utf-8')
+    uploaded = add_resource_image_blocks(
+        'world/philosophy/example',
+        [
+            make_callout('\U0001f5bc\ufe0f', 'Example cover'),
+            make_callout(
+                '\U0001f3de\ufe0f',
+                'diagram|svg|Example diagram|true',
+            ),
+        ],
+        resource_dir=resource,
+    )
+    check("Upload cover image block type", uploaded[0]['type'], "image")
+    check(
+        "Upload canonical flat cover URL",
+        uploaded[0]['image']['external']['url'],
+        "https://ujnotes.com/world/philosophy/example.jpg",
+    )
+    check("Upload preserves cover callout", uploaded[1]['type'], "callout")
+    check("Upload preserves inline callout", uploaded[2]['type'], "callout")
+    check("Upload inline image block type", uploaded[3]['type'], "image")
+    check(
+        "Upload inline image URL",
+        uploaded[3]['image']['external']['url'],
+        "https://ujnotes.com/world/philosophy/example/diagram.svg",
+    )
+    check(
+        "Upload inline image caption",
+        uploaded[3]['image']['caption'][0]['text']['content'],
+        "Example diagram",
+    )
+
 # Unknown callout (default to paragraph)
 block = {"callout": {
     "icon": {"type": "emoji", "emoji": "\u2764\ufe0f"},
@@ -450,10 +493,10 @@ mock_page_no_lang = {
     }
 }
 
-# Monkey-patch fetch_page_content to avoid API calls
+# Monkey-patch block fetching to avoid API calls
 import ncms_fetch
-original_fpc = ncms_fetch.fetch_page_content
-ncms_fetch.fetch_page_content = lambda page_id: '<p>Mock content</p>'
+original_fpb = ncms_fetch.fetch_page_blocks
+ncms_fetch.fetch_page_blocks = lambda page_id: []
 
 try:
     articles = extract_fields([mock_page_en, mock_page_hi, mock_page_no_lang])
@@ -482,7 +525,7 @@ try:
     check("Explicit test status included", str(len(test_articles)), "1")
     check("Explicit test status retained", test_articles[0]['status'], "test")
 finally:
-    ncms_fetch.fetch_page_content = original_fpc
+    ncms_fetch.fetch_page_blocks = original_fpb
 
 
 print(f"\n=== Results: {passed} passed, {failed} failed ===")

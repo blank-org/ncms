@@ -19,6 +19,7 @@ import json
 import time
 import base64
 import html as html_module
+from pathlib import Path
 from bs4 import BeautifulSoup, NavigableString, Tag
 from notion_client import Client
 from dotenv import load_dotenv
@@ -29,6 +30,7 @@ sys.stdout.reconfigure(encoding='utf-8')
 
 COMPONENT_DIR = r'H:\Website\site\project\root\HTML\Component'
 TSV_PATH = r'H:\Website\site\project\config\ID.tsv'
+RESOURCE_DIR = str(Path(COMPONENT_DIR).parent.parent / 'Resource')
 
 load_dotenv()
 notion = Client(auth=os.getenv('NOTION_API_KEY'))
@@ -143,6 +145,112 @@ def make_text(content, annotations=None, link=None):
         if ann:
             rt["annotations"] = ann
     return rt
+
+
+def make_external_image(url, alt=''):
+    """Create a Notion image block backed by a stable public site URL."""
+    image = {
+        "type": "external",
+        "external": {"url": normalize_url(url)},
+    }
+    if alt:
+        image["caption"] = [make_text(alt)]
+    return {
+        "object": "block",
+        "type": "image",
+        "image": image,
+    }
+
+
+def _resolve_case_insensitive(root, relative):
+    """Resolve a relative resource path without changing legacy casing."""
+    current = Path(root)
+    for part in Path(relative).parts:
+        if not current.is_dir():
+            return None
+        matches = [
+            child for child in current.iterdir()
+            if child.name.casefold() == part.casefold()
+        ]
+        if not matches:
+            return None
+        matches.sort(key=lambda child: child.name != part)
+        current = matches[0]
+    return current
+
+
+def find_cover_resource(slug, resource_dir=RESOURCE_DIR):
+    """Find a flat or directory-layout article cover in Resource."""
+    slug_path = Path(*slug.strip('/').split('/'))
+    candidates = []
+    for extension in ('jpg', 'jpeg', 'png', 'svg'):
+        candidates.extend((
+            slug_path.with_suffix(f'.{extension}'),
+            slug_path / f'index.{extension}',
+        ))
+    for relative in candidates:
+        resolved = _resolve_case_insensitive(resource_dir, relative)
+        if resolved is not None and resolved.is_file():
+            return resolved
+    return None
+
+
+def find_content_resource(slug, image_name, extension,
+                          resource_dir=RESOURCE_DIR):
+    """Find an inline article image referenced by a content-image callout."""
+    relative = Path(*slug.strip('/').split('/')) / f'{image_name}.{extension}'
+    resolved = _resolve_case_insensitive(resource_dir, relative)
+    return resolved if resolved is not None and resolved.is_file() else None
+
+
+def add_resource_image_blocks(slug, blocks, resource_dir=RESOURCE_DIR,
+                              site_base=SITE_BASE):
+    """Pair semantic image callouts with Notion-visible external images.
+
+    The callouts remain the round-trip metadata used by NCMS. The image blocks
+    point at canonical Ujnotes URLs so a website-to-Notion upload preserves the
+    actual visuals as well as their rendering instructions.
+    """
+    output = []
+    cover_added = False
+    cover_emoji = '\U0001f5bc\ufe0f'
+    content_emoji = '\U0001f3de\ufe0f'
+    for block in blocks:
+        callout = (
+            block.get('callout', {})
+            if block.get('type') == 'callout'
+            else {}
+        )
+        icon = callout.get('icon', {})
+        emoji = icon.get('emoji') if icon.get('type') == 'emoji' else None
+        rich_text = callout.get('rich_text', [])
+        text = ''.join(
+            item.get('plain_text', item.get('text', {}).get('content', ''))
+            for item in rich_text
+        )
+
+        if emoji == cover_emoji and not cover_added:
+            cover = find_cover_resource(slug, resource_dir)
+            if cover is not None:
+                url = f"{site_base.rstrip('/')}/{slug.strip('/')}.jpg"
+                output.append(make_external_image(url, text))
+                cover_added = True
+
+        output.append(block)
+
+        if emoji == content_emoji:
+            parts = text.split('|')
+            image_name = parts[0].strip() if parts else ''
+            extension = parts[1].strip() if len(parts) > 1 else 'svg'
+            alt = parts[2].strip() if len(parts) > 2 else ''
+            if image_name and extension and find_content_resource(
+                    slug, image_name, extension, resource_dir) is not None:
+                url = (
+                    f"{site_base.rstrip('/')}/{slug.strip('/')}/"
+                    f"{image_name}.{extension}"
+                )
+                output.append(make_external_image(url, alt))
+    return output
 
 
 def element_to_rich_text(element):
@@ -854,6 +962,11 @@ def clear_page_content(page_id):
             kwargs['start_cursor'] = start_cursor
         response = notion.blocks.children.list(**kwargs)
         for block in response['results']:
+            if block.get('type') in {'child_page', 'child_database'}:
+                print(
+                    f"  Preserving nested {block['type']} {block.get('id', '')}"
+                )
+                continue
             try:
                 notion.blocks.delete(block_id=block['id'])
             except Exception as e:
@@ -941,6 +1054,7 @@ def main():
 
         try:
             blocks = parse_file_to_blocks(file_path)
+            blocks = add_resource_image_blocks(slug, blocks)
             print(f"  Parsed {len(blocks)} blocks")
 
             if dry_run:
@@ -950,6 +1064,14 @@ def main():
                         emoji = block['callout']['icon']['emoji']
                         text = block['callout']['rich_text'][0]['text']['content'][:60]
                         print(f"    [{i}] {btype} {emoji} : {text}")
+                    elif btype == 'image':
+                        image = block['image']
+                        image_type = image['type']
+                        image_source = image[image_type]
+                        image_url = image_source.get('url', image_source.get('id', ''))
+                        print(
+                            f"    [{i}] {btype}: {image_url}"
+                        )
                     elif btype == 'table':
                         nrows = len(block['table']['children'])
                         print(f"    [{i}] {btype} ({nrows} rows)")
