@@ -233,8 +233,10 @@ python ncms_fetch.py publish \
 ```
 
 When more than one page is queued, pass `--slug world/philosophy/example`.
-Scheduled polling may pass `--allow-empty`, which turns an empty queue into a
-successful no-op. Multiple queued pages remain an error.
+`--allow-empty` turns an empty queue into a successful no-op (for a scheduler).
+Scheduled Notion polling is parked; publication is started by a manual
+`workflow_dispatch` or by the local `publish-notion*.ps1` scripts. Multiple
+queued pages remain an error.
 
 The publish command always disables NCMS git pushes and Notion updates. After the
 generated article has been deployed and independently verified, mark the same page
