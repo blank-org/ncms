@@ -614,8 +614,11 @@ def update_url_tsv(articles, output_base):
         by_lang.setdefault(lang, []).append(article)
 
     for lang, lang_articles in by_lang.items():
-        suffix = '' if lang == 'en' else f'_{lang}'
-        url_tsv_path = os.path.join(output_base, f'Config/Url{suffix}.tsv')
+        # Shared covers belong in Url.tsv. Language files are hand-maintained
+        # for language-specific assets only (for example hi/computer/*.svg).
+        if lang != 'en':
+            continue
+        url_tsv_path = os.path.join(output_base, 'Config/Url.tsv')
         os.makedirs(os.path.dirname(url_tsv_path), exist_ok=True)
 
         existing_entries = {}
