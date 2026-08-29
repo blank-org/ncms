@@ -56,6 +56,33 @@ class PublishSelectionTests(unittest.TestCase):
                     ncms_fetch.validate_slug(slug)
 
 
+class ResolvePublishPagesTests(unittest.TestCase):
+    def test_falls_back_to_id_query_when_status_listing_omits_slug(self):
+        listed = [make_page("other", page_id="page-other")]
+        targeted = [make_page("timeline", page_id="page-timeline")]
+        with (
+            patch.object(
+                ncms_fetch,
+                "fetch_database_content",
+                return_value=listed,
+            ),
+            patch.object(
+                ncms_fetch,
+                "fetch_page_by_id_title",
+                return_value=targeted,
+            ) as fetch_by_id,
+        ):
+            pages = ncms_fetch.resolve_publish_pages(
+                "database", status="publish", requested_slug="timeline"
+            )
+
+        fetch_by_id.assert_called_once_with("database", "timeline", status="publish")
+        self.assertEqual(["page-other", "page-timeline"], [page["id"] for page in pages])
+        selected, _, language = ncms_fetch.select_publish_page(pages, "timeline")
+        self.assertEqual("page-timeline", selected["id"])
+        self.assertIsNone(language)
+
+
 class PublishBundleTests(unittest.TestCase):
     def test_writes_metadata_and_disables_side_effects(self):
         article = {

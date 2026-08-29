@@ -41,6 +41,52 @@ def fetch_database_content(database_id, status='publish'):
         start_cursor = response.get('next_cursor', None)
     return results
 
+
+def fetch_page_by_id_title(database_id, slug, status='publish'):
+    """Fetch Status-matched rows whose Id title equals slug.
+
+    Notion's Status-only listing can omit rows that a compound Id filter still
+    returns, so slug-targeted publishes must query the page directly.
+    """
+    response = notion.databases.query(
+        database_id=database_id,
+        filter={
+            "and": [
+                {"property": "Status", "select": {"equals": status}},
+                {"property": "Id", "title": {"equals": slug}},
+            ]
+        },
+    )
+    return response.get("results", [])
+
+
+def resolve_publish_pages(database_id, status='publish', requested_slug=None):
+    pages = fetch_database_content(database_id, status=status)
+    if not requested_slug:
+        return pages
+    try:
+        select_publish_page(pages, requested_slug)
+        return pages
+    except RuntimeError:
+        pass
+
+    requested_slug = validate_slug(requested_slug)
+    lookups = [requested_slug]
+    parts = requested_slug.split("/", 1)
+    if len(parts) == 2 and LANGUAGE_PREFIX_PATTERN.fullmatch(parts[0].lower()):
+        lookups.append(parts[1])
+
+    seen_ids = {page.get("id") for page in pages}
+    extra = []
+    for lookup in lookups:
+        for page in fetch_page_by_id_title(database_id, lookup, status=status):
+            if page.get("id") not in seen_ids:
+                extra.append(page)
+                seen_ids.add(page.get("id"))
+        if extra:
+            break
+    return pages + extra
+
 # --- Rich text rendering ---
 
 def escape_php_single_quoted(value):
@@ -997,7 +1043,7 @@ def publish_to_bundle(status, slug, bundle_dir, metadata_file, allow_empty=False
     os.makedirs(bundle_dir, exist_ok=True)
     os.makedirs(os.path.dirname(metadata_file), exist_ok=True)
 
-    pages = fetch_database_content(database_id, status=status)
+    pages = resolve_publish_pages(database_id, status=status, requested_slug=slug)
     if not pages and allow_empty:
         metadata = {"no_work": True, "queued_slugs": []}
         with open(metadata_file, "w", encoding="utf-8", newline="\n") as target:
