@@ -10,7 +10,7 @@ sys.stdout.reconfigure(encoding='utf-8')
 
 from bs4 import BeautifulSoup
 
-from ncms_fetch import render_rich_text, wrap_lists
+from ncms_fetch import render_rich_text, wrap_leading_date, wrap_lists
 from ncms_fetch import (
     handle_paragraph, handle_heading_1, handle_heading_2, handle_heading_3,
     handle_bulleted_list_item, handle_numbered_list_item,
@@ -156,6 +156,20 @@ block = {"bulleted_list_item": {"rich_text": [rt("Bullet item")]}}
 btype, html = handle_bulleted_list_item(block, None)
 check("Bulleted list type", btype, "bulleted_list_item")
 check("Bulleted list html", html, "<li><div>Bullet item</div></li>")
+
+block = {"bulleted_list_item": {"rich_text": [rt("27 Aug 2026 — published Binary search")]}}
+btype, html = handle_bulleted_list_item(block, None)
+check("Timeline date wrap", html, "<span class='date'>27 Aug 2026</span> — published Binary search")
+
+block = {"bulleted_list_item": {"rich_text": [rt("\u00a03 Aug 2026 — published Hindu")]}}
+btype, html = handle_bulleted_list_item(block, None)
+check("Timeline padded date wrap", html, "<span class='date'>3 Aug 2026</span> — published Hindu")
+
+check(
+    "wrap_leading_date keeps later dash",
+    wrap_leading_date("29 Feb 2016 — first version — Cutie"),
+    "<span class='date'>29 Feb 2016</span> — first version — Cutie",
+)
 
 # Numbered list
 block = {"numbered_list_item": {"rich_text": [rt("Num item")]}}

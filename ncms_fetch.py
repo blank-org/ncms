@@ -150,6 +150,22 @@ def render_rich_text(rich_text_list):
     return ''.join(html_parts)
 
 
+LEADING_DATE_SEPARATOR = re.compile(
+    r'^(?:&nbsp;|\xa0|\s)*'
+    r'(\d{1,2}\s+[A-Za-z]{3}\s+\d{4})'
+    r'\s*(?:—|&mdash;|–|&ndash;|-)\s*'
+)
+
+
+def wrap_leading_date(html):
+    """Keep timeline dates in a fixed-width span so the following dash lines up."""
+    return LEADING_DATE_SEPARATOR.sub(
+        r"<span class='date'>\1</span> — ",
+        html,
+        count=1,
+    )
+
+
 # --- Block handlers ---
 # Each returns a tuple of (block_type, html_string) for list wrapping post-processing
 
@@ -177,12 +193,12 @@ def handle_heading_3(block, notion_client):
 
 def handle_bulleted_list_item(block, notion_client):
     rich_text = block['bulleted_list_item'].get('rich_text', [])
-    text = render_rich_text(rich_text)
+    text = wrap_leading_date(render_rich_text(rich_text))
     return ('bulleted_list_item', f"\t\t<li><div>{text}</div></li>\n")
 
 def handle_numbered_list_item(block, notion_client):
     rich_text = block['numbered_list_item'].get('rich_text', [])
-    text = render_rich_text(rich_text)
+    text = wrap_leading_date(render_rich_text(rich_text))
     return ('numbered_list_item', f"\t\t<li><div>{text}</div></li>\n")
 
 def handle_table(block, notion_client):
