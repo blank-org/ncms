@@ -1026,35 +1026,40 @@ def update_translations_tsv(articles, output_base):
 
 # Update Url.tsv with overwrite for existing entries (per-language)
 def update_url_tsv(articles, output_base):
-    by_lang = {}
-    for article in articles:
-        lang = article.get('language', 'en')
-        by_lang.setdefault(lang, []).append(article)
+    # Shared covers belong in Url.tsv. Language-specific assets are maintained
+    # separately; translated pages use the base cover unless one is supplied.
+    english = [article for article in articles if article.get('language', 'en') == 'en']
+    if not english:
+        return
+    url_tsv_path = os.path.join(output_base, 'Config/Url.tsv')
+    os.makedirs(os.path.dirname(url_tsv_path), exist_ok=True)
 
-    for lang, lang_articles in by_lang.items():
-        # Shared covers belong in Url.tsv. Language files are hand-maintained
-        # for language-specific assets only (for example hi/computer/*.svg).
-        if lang != 'en':
+    def jpg_slug(line):
+        fields = line.split('\t')
+        if len(fields) < 3 or fields[2].strip().lower() != 'jpg':
+            return None
+        path = fields[0].replace('\\', '/').strip('/')
+        name = fields[1].strip('/')
+        return path if name == 'index' else '/'.join(part for part in (path, name) if part)
+
+    existing = []
+    if os.path.exists(url_tsv_path):
+        with open(url_tsv_path, 'r', encoding='utf-8') as source:
+            existing = [line.rstrip('\r\n') for line in source if line.strip()]
+
+    updated_slugs = {article['slug'] for article in english}
+    rows = [line for line in existing if jpg_slug(line) not in updated_slugs]
+    for article in english:
+        if 'Component_cover.php' not in article.get('content', ''):
             continue
-        url_tsv_path = os.path.join(output_base, 'Config/Url.tsv')
-        os.makedirs(os.path.dirname(url_tsv_path), exist_ok=True)
+        parent, _, name = article['slug'].rpartition('/')
+        path = f'{parent}/' if parent else ''
+        rows.append(f'{path}\t{name}\tjpg')
 
-        existing_entries = {}
-        if os.path.exists(url_tsv_path):
-            with open(url_tsv_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    parts = line.strip().split('\t')
-                    if len(parts) >= 1:
-                        existing_entries[parts[0]] = line.strip()
-
-        with open(url_tsv_path, 'w', encoding='utf-8') as f:
-            for article in lang_articles:
-                path = article['slug'].replace('/', '\\')
-                line = f"{path}\tindex\tjpg"
-                existing_entries[path] = line
-            for entry in existing_entries.values():
-                f.write(f"{entry}\n")
-        print(f"Updated {url_tsv_path}")
+    with open(url_tsv_path, 'w', encoding='utf-8', newline='\n') as target:
+        for row in rows:
+            target.write(row + '\n')
+    print(f"Updated {url_tsv_path}")
 
 # Update firebase.json with dynamic rewrites and redirects
 def update_firebase_json(articles, output_base):
