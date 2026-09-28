@@ -1,0 +1,31 @@
+{
+    "hosting": {
+        "public": "public",
+        "ignore": [
+            ".htaccess"
+        ],
+        "redirects": [],
+        "rewrites": [
+            {
+                "source": "/hi/menu",
+                "destination": "/hi/root/index.html"
+            },
+            {
+                "source": "/business.json",
+                "destination": "/business/index.json"
+            },
+            {
+                "source": "/business.jpg",
+                "destination": "/business/index.jpg"
+            },
+            {
+                "source": "/hi/business.json",
+                "destination": "/hi/business/index.json"
+            },
+            {
+                "source": "/hi/business.jpg",
+                "destination": "/hi/business/index.jpg"
+            }
+        ]
+    }
+}

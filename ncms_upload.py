@@ -28,8 +28,8 @@ sys.stdout.reconfigure(encoding='utf-8')
 
 # --- Config ---
 
-COMPONENT_DIR = r'H:\Website\site\project\root\HTML\Component'
-TSV_PATH = r'H:\Website\site\project\config\ID.tsv'
+COMPONENT_DIR = r'D:\Ujnotes\Website\site\project\root\HTML\Component'
+TSV_PATH = r'D:\Ujnotes\Website\site\project\config\ID.tsv'
 RESOURCE_DIR = str(Path(COMPONENT_DIR).parent.parent / 'Resource')
 
 load_dotenv()
@@ -1008,6 +1008,10 @@ def main():
         if arg != '--dry-run':
             target_slug = arg
 
+    if target_slug == 'root':
+        print('The root page is Notion-owned; edit it in Notion and run ncms_fetch.py sync-home.')
+        return
+
     print("Building file map from Component directory...")
     file_map = build_file_map()
     print(f"  Found {len(file_map)} files")
@@ -1035,6 +1039,10 @@ def main():
     failed = 0
 
     for slug in tsv_slugs:
+        if slug == 'root':
+            print('SKIP root: its generated homepage shell must not be uploaded to Notion')
+            skipped += 1
+            continue
         # Find file
         file_path = file_map.get(slug)
         if not file_path:

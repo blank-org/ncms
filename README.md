@@ -194,6 +194,30 @@ world/philosophy/death|Death
 <?php link_xurl('world/philosophy/death', 'Death') ?>
 ```
 
+#### Page layout — `📐`
+
+Selects a Cutie layout so a custom page can take its **data from Notion** while keeping site CSS.
+
+**Notion:** Callout with 📐 icon. First line is the layout name:
+
+```
+me-table
+```
+
+Optional second line: `bottom: nav` or `bottom: default`. `me-table` defaults to `bottom: nav` (no Facebook comments / updated date). Nested translations inherit the canonical layout unless they include their own 📐 callout.
+
+**`me-table`:** Each Heading 1–3 is a left-hand label (`.R1`). Paragraphs until the next heading become the value (`.R2`), joined with `<br>`. A divider ends the table; following blocks (such as the AI disclosure) render normally. Well-known profile URLs keep badge element ids (`linkedin-badge`, `stackoverflow-badge`, `facebook-badge`).
+
+**Output shell:**
+```php
+<div id='message' class='center'>
+	<div id='me-table'>...</div>
+</div>
+<?php require('../HTML/Fragment/Component_bottom_nav.php') ?>
+```
+
+Do not paste `About_me.php` markup or `Component_bottom_nav.php` into a 🔧 callout for this layout.
+
 #### Raw PHP/HTML — `🔧`
 
 Outputs the callout text verbatim with no transformation. Use this for any complex PHP/HTML that doesn't fit other patterns (e.g. `group_image()` calls, Facebook components, custom includes).
@@ -205,6 +229,24 @@ Treat this callout as trusted code. Normal Notion text, links, code blocks, and 
 ```php
 <?php group_image('paths', 3, 'svg') ?>
 ```
+
+#### Homepage and navigation — `📐 home`, `🏠`, `🧭`
+
+The published `root` row in the Website database owns the homepage intro and both menus. Put `home` in a 📐 layout callout. Ordinary paragraphs and links become the text inside `#home-message`; NCMS supplies the profile image, homepage tree, and page shell. The Hindi child keeps its 🌐 metadata and translated intro; it inherits the home layout.
+
+Add a 🏠 callout with one JSON code child for the homepage tree policy, and a 🧭 callout with one JSON code child for the side menu policy. The JSON blocks are configuration and are never displayed in the article body. NCMS validates both policies before writing `Config/Home.json` and `Config/Menu.json`. Published `Config/ID.tsv` rows supply the actual tree and labels; the home policy declares synthetic hub children, selected subsets, caps, leaves, and full-width groups. Side menu groups select published slugs; `includeHomeHubs: true` appends the current synthetic hub children automatically. Side menu labels use the localized Notion page Label, with optional per-language `labels` overrides in the 🧭 JSON for cases such as the Home tile.
+
+To refresh the local source after editing the published Notion row:
+
+```powershell
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Console]::OutputEncoding
+$env:PYTHONUTF8 = '1'
+$env:PYTHONIOENCODING = 'utf-8'
+.\.venv\Scripts\python.exe ncms_fetch.py sync-home --site-project D:\Ujnotes\Website\site\project
+```
+
+Run this from the NCMS directory. It updates the English and Hindi homepage components and both menu JSON files locally; it does not bake, push, or change the Notion status. The reverse uploader skips `root` so it cannot replace the Notion policy with generated PHP.
 
 ## Verification
 

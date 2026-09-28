@@ -7,7 +7,10 @@ from html import escape
 from notion_client import Client
 from dotenv import load_dotenv
 import subprocess
+import shutil
+import tempfile
 from datetime import datetime
+from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 # Load environment variables
@@ -20,6 +23,7 @@ git_push_enabled = os.getenv('GIT_PUSH', 'false').lower() == 'true'
 notion_update_enabled = os.getenv('NOTION_UPDATE', 'false').lower() == 'true'
 
 SAFE_SLUG_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_./-]*$')
+NAV_SLUG_PATTERN = re.compile(r'^[a-z0-9_]+(?:/[a-z0-9_]+)*$')
 LANGUAGE_PREFIX_PATTERN = re.compile(r'^[a-z]{2,3}(?:-[a-z]{2})?$')
 NESTED_TRANSLATION_TITLE_PATTERN = re.compile(
     r'^.+\(([A-Za-z]{2,3}(?:-[A-Za-z]{2})?)\)\s*$'
@@ -137,7 +141,11 @@ def render_rich_text(rich_text_list):
             if path is not None:
                 # Internal XURL link
                 clean_path = path.lstrip('/')
-                safe_path = escape(path, quote=True)
+                href_path = path if path.startswith('/') else '/' + path
+                if not clean_path:
+                    clean_path = 'root'
+                    href_path = '/'
+                safe_path = escape(href_path, quote=True)
                 safe_target = escape(clean_path, quote=True)
                 safe_display = escape(plain_text, quote=True)
                 text = f'<a class="content-link XURL" href="{safe_path}" data-target="{safe_target}" data-title="{safe_display}">{text}</a>'
@@ -281,11 +289,31 @@ def handle_first_letter_high(block, rich_text):
         return ('callout', f"\t<p class='first-letter-high'>\n\t\t{text}\n\t</p>\n")
     return ('callout', '')
 
+def normalize_emoji(emoji):
+    return (emoji or '').replace('\ufe0f', '')
+
+
+def callout_emoji(block):
+    icon = (block.get('callout') or {}).get('icon') or {}
+    if icon.get('type') != 'emoji':
+        return ''
+    return icon.get('emoji', '') or ''
+
+
+def handle_layout(block, rich_text):
+    """📐 callout — page layout metadata; not rendered as body HTML."""
+    return ('layout', '')
+
+
+def handle_navigation_policy(block, rich_text):
+    """🏠/🧭 callouts are rendered into config files, never page content."""
+    return ('navigation', '')
+
+
 def handle_callout(block, notion_client):
-    icon = block['callout'].get('icon', {})
-    emoji = icon.get('emoji', '') if icon.get('type') == 'emoji' else ''
+    emoji = callout_emoji(block)
     rich_text = block['callout'].get('rich_text', [])
-    handler = CALLOUT_HANDLERS.get(emoji)
+    handler = CALLOUT_HANDLERS.get(emoji) or CALLOUT_HANDLERS.get(normalize_emoji(emoji))
     if handler:
         return handler(block, rich_text)
     # Default: render an unrecognized callout as a normal paragraph.
@@ -301,6 +329,9 @@ CALLOUT_HANDLERS = {
     '🔗': handle_link_xurl,
     '🔧': handle_raw_php,
     '🔠': handle_first_letter_high,
+    '📐': handle_layout,
+    '🏠': handle_navigation_policy,
+    '🧭': handle_navigation_policy,
 }
 
 BLOCK_HANDLERS = {
@@ -382,6 +413,291 @@ def plain_rich_text(rich_text):
     return ''.join(item.get('plain_text', '') for item in rich_text)
 
 
+LAYOUT_EMOJI = '📐'
+HOME_POLICY_EMOJI = '🏠'
+SIDE_POLICY_EMOJI = '🧭'
+ME_TABLE_HEADINGS = {'heading_1', 'heading_2', 'heading_3'}
+PROFILE_LINK_IDS = (
+    ('linkedin.com', 'linkedin-badge'),
+    ('stackoverflow.com/users', 'stackoverflow-badge'),
+    ('facebook.com', 'facebook-badge'),
+)
+
+
+def parse_page_layout(blocks):
+    """Read a 📐 callout: layout name plus optional bottom: nav|default."""
+    for block in blocks:
+        if block.get('type') != 'callout':
+            continue
+        if normalize_emoji(callout_emoji(block)) != LAYOUT_EMOJI:
+            continue
+        text = plain_rich_text((block.get('callout') or {}).get('rich_text', []))
+        fields = {}
+        tokens = []
+        for line in text.replace('<br>', '\n').splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if ':' in line:
+                key, value = line.split(':', 1)
+                key = key.strip().lower()
+                value = value.strip()
+                fields[key] = value
+                if key in ('layout', 'name') and value:
+                    tokens.append(value)
+            else:
+                tokens.append(line)
+        name = (
+            fields.get('layout')
+            or fields.get('name')
+            or (tokens[0] if tokens else '')
+        ).strip().lower()
+        if not name:
+            continue
+        bottom = (fields.get('bottom') or '').strip().lower()
+        if bottom not in ('nav', 'default'):
+            bottom = 'nav' if name == 'me-table' else 'default'
+        return {
+            'block_id': block.get('id'),
+            'name': name,
+            'bottom': bottom,
+        }
+    return None
+
+
+def _nav_slug(value, field):
+    if not isinstance(value, str) or not NAV_SLUG_PATTERN.fullmatch(value):
+        raise ValueError(f'{field} must be a lowercase component slug: {value!r}')
+    return value
+
+
+def _nav_slug_list(value, field):
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f'{field} must be a list of slugs')
+    slugs = [_nav_slug(item, field) for item in value]
+    if len(slugs) != len(set(slugs)):
+        raise ValueError(f'{field} contains duplicate slugs')
+    return slugs
+
+
+def validate_home_policy(policy):
+    if not isinstance(policy, dict):
+        raise ValueError('Home menu policy must be a JSON object')
+    allowed = {'branch', 'syntheticChildren', 'leafSlugs', 'capChildrenOf',
+               'largeGroupSlugs', 'selectedChildren', 'childLimits'}
+    if set(policy) - allowed:
+        raise ValueError(f'Unknown home menu policy keys: {set(policy) - allowed}')
+    _nav_slug(policy.get('branch'), 'branch')
+    for key in ('leafSlugs', 'capChildrenOf', 'largeGroupSlugs'):
+        _nav_slug_list(policy.get(key, []), key)
+    for key in ('syntheticChildren', 'selectedChildren'):
+        rules = policy.get(key, {})
+        if not isinstance(rules, dict):
+            raise ValueError(f'{key} must be an object')
+        for parent, children in rules.items():
+            _nav_slug(parent, key)
+            slugs = _nav_slug_list(children, f'{key}.{parent}')
+            if key == 'selectedChildren' and any(
+                child.rpartition('/')[0] != parent for child in slugs
+            ):
+                raise ValueError(f'{key}.{parent} must contain direct children')
+    limits = policy.get('childLimits', {})
+    if not isinstance(limits, dict):
+        raise ValueError('childLimits must be an object')
+    for parent, limit in limits.items():
+        _nav_slug(parent, 'childLimits')
+        if type(limit) is not int or limit < 1:
+            raise ValueError(f'childLimits.{parent} must be a positive integer')
+    return policy
+
+
+def validate_side_policy(policy):
+    if not isinstance(policy, dict) or set(policy) - {'groups', 'labels'} or 'groups' not in policy:
+        raise ValueError('Side menu policy needs groups and optional labels')
+    groups = policy['groups']
+    if not isinstance(groups, list) or not groups:
+        raise ValueError('Side menu groups must be a nonempty list')
+    seen = set()
+    for group in groups:
+        if (not isinstance(group, dict) or 'kind' not in group or 'items' not in group
+                or set(group) - {'kind', 'items', 'includeHomeHubs'}):
+            raise ValueError('Each side menu group needs kind and items')
+        if group['kind'] not in ('image', 'text'):
+            raise ValueError('Side menu kind must be image or text')
+        items = _nav_slug_list(group['items'], 'side menu items')
+        if 'includeHomeHubs' in group and type(group['includeHomeHubs']) is not bool:
+            raise ValueError('includeHomeHubs must be a boolean')
+        if not items or seen.intersection(items):
+            raise ValueError('Side menu groups need unique, nonempty items')
+        seen.update(items)
+    labels = policy.get('labels', {})
+    if not isinstance(labels, dict):
+        raise ValueError('Side menu labels must be an object')
+    for slug, translations in labels.items():
+        _nav_slug(slug, 'labels')
+        if not isinstance(translations, dict):
+            raise ValueError(f'Side menu labels.{slug} must be an object')
+        for language, label in translations.items():
+            if not LANGUAGE_PREFIX_PATTERN.fullmatch(language) and language != 'en':
+                raise ValueError(f'Invalid side menu language: {language!r}')
+            if not isinstance(label, str) or not label.strip():
+                raise ValueError(f'Side menu labels.{slug}.{language} must be text')
+    return policy
+
+
+def parse_navigation_policy(block, name, validator):
+    """Read one JSON code child of a named Notion navigation callout."""
+    if not block.get('has_children'):
+        raise ValueError(f'{name} callout needs one JSON code child')
+    children = fetch_page_blocks(block['id'])
+    if len(children) != 1 or children[0].get('type') != 'code':
+        raise ValueError(f'{name} callout needs exactly one JSON code child')
+    source = plain_rich_text(children[0]['code'].get('rich_text', []))
+    try:
+        return validator(json.loads(source))
+    except json.JSONDecodeError as error:
+        raise ValueError(f'{name} contains invalid JSON: {error}') from error
+
+
+def extract_home_navigation(blocks):
+    found = {}
+    for block in blocks:
+        if block.get('type') != 'callout':
+            continue
+        emoji = normalize_emoji(callout_emoji(block))
+        if emoji not in (HOME_POLICY_EMOJI, SIDE_POLICY_EMOJI):
+            continue
+        name, validator = (
+            ('home', validate_home_policy) if emoji == HOME_POLICY_EMOJI
+            else ('side', validate_side_policy)
+        )
+        if name in found:
+            raise ValueError(f'Duplicate {name} navigation callout')
+        found[name] = parse_navigation_policy(block, name, validator)
+    if set(found) != {'home', 'side'}:
+        raise ValueError('The root page needs 🏠 and 🧭 navigation callouts')
+    return found
+
+
+def heading_plain(block):
+    block_type = block.get('type')
+    rich_text = (block.get(block_type) or {}).get('rich_text', [])
+    return render_rich_text(rich_text)
+
+
+def apply_profile_link_ids(html):
+    """Keep About-me badge CSS hooks on well-known profile links."""
+    for needle, element_id in PROFILE_LINK_IDS:
+        pattern = re.compile(
+            r'<a (?![^>]*\bid=)([^>]*href="[^"]*'
+            + re.escape(needle)
+            + r'[^"]*")',
+            re.IGNORECASE,
+        )
+        html = pattern.sub(rf"<a id='{element_id}' \1", html, count=1)
+    return html
+
+
+def me_table_html(rows):
+    parts = ["\t<div id='me-table'>\n"]
+    for row in rows:
+        value = '<br>\n\t\t\t\t'.join(part for part in row['parts'] if part)
+        value = apply_profile_link_ids(value)
+        parts.append("\t\t<div>\n")
+        parts.append(f"\t\t\t<div class='R1'>{row['label']}</div>\n")
+        parts.append("\t\t\t<div class='R2'>\n")
+        parts.append(f"\t\t\t\t{value}\n")
+        parts.append("\t\t\t</div>\n")
+        parts.append("\t\t</div>\n")
+    parts.append("\t</div>\n")
+    return ''.join(parts)
+
+
+def render_labeled_profile(blocks, skip_block_ids):
+    """Heading + following paragraphs become #me-table rows; keep the CSS contract."""
+    skip_block_ids = set(skip_block_ids)
+    prefix_tuples = []
+    tail_tuples = []
+    rows = []
+    current = None
+    phase = 'prefix'
+
+    def flush_row():
+        nonlocal current
+        if current and current.get('label'):
+            rows.append(current)
+        current = None
+
+    def handle_standard(block):
+        handler = BLOCK_HANDLERS.get(block.get('type'))
+        if not handler:
+            return None
+        result = handler(block, notion)
+        return result if result and result[1] else None
+
+    for block in blocks:
+        if block.get('id') in skip_block_ids or block.get('type') == 'child_page':
+            continue
+        block_type = block.get('type')
+        if phase == 'prefix':
+            if block_type in ME_TABLE_HEADINGS:
+                phase = 'rows'
+                current = {'label': heading_plain(block), 'parts': []}
+            else:
+                result = handle_standard(block)
+                if result:
+                    prefix_tuples.append(result)
+            continue
+        if phase == 'rows':
+            if block_type in ME_TABLE_HEADINGS:
+                flush_row()
+                current = {'label': heading_plain(block), 'parts': []}
+                continue
+            if block_type == 'divider':
+                flush_row()
+                phase = 'tail'
+                result = handle_standard(block)
+                if result:
+                    tail_tuples.append(result)
+                continue
+            if current is None:
+                result = handle_standard(block)
+                if result:
+                    tail_tuples.append(result)
+                phase = 'tail'
+                continue
+            if block_type == 'paragraph':
+                text = render_rich_text((block.get('paragraph') or {}).get('rich_text', []))
+                if text:
+                    current['parts'].append(text)
+                continue
+            if block_type in ('bulleted_list_item', 'numbered_list_item'):
+                rich_text = (block.get(block_type) or {}).get('rich_text', [])
+                text = wrap_leading_date(render_rich_text(rich_text))
+                if text:
+                    current['parts'].append(text)
+                continue
+            flush_row()
+            phase = 'tail'
+            result = handle_standard(block)
+            if result:
+                tail_tuples.append(result)
+            continue
+        result = handle_standard(block)
+        if result:
+            tail_tuples.append(result)
+    flush_row()
+
+    html_parts = []
+    prefix_html = wrap_lists(prefix_tuples)
+    if prefix_html:
+        html_parts.append(prefix_html)
+    if rows:
+        html_parts.append(me_table_html(rows))
+    html_parts.append(wrap_lists(tail_tuples))
+    return ''.join(html_parts)
+
+
 def parse_translation_metadata(blocks, expected_language):
     for block in blocks:
         if block.get('type') != 'callout':
@@ -421,9 +737,14 @@ def parse_translation_metadata(blocks, expected_language):
     )
 
 
-def render_page_blocks(blocks, skip_block_ids=()):
-    block_tuples = []
+def render_page_blocks(blocks, skip_block_ids=(), layout=None):
+    layout = layout if layout is not None else parse_page_layout(blocks)
     skip_block_ids = set(skip_block_ids)
+    if layout and layout.get('block_id'):
+        skip_block_ids.add(layout['block_id'])
+    if layout and layout.get('name') == 'me-table':
+        return render_labeled_profile(blocks, skip_block_ids)
+    block_tuples = []
     for block in blocks:
         if block.get('id') in skip_block_ids:
             continue
@@ -436,8 +757,30 @@ def render_page_blocks(blocks, skip_block_ids=()):
     return wrap_lists(block_tuples)
 
 
+def render_article_body(blocks, extra_skip=()):
+    layout = parse_page_layout(blocks)
+    html = render_page_blocks(blocks, skip_block_ids=extra_skip, layout=layout)
+    return html, layout
+
+
+def localize_xurl_links(html, language):
+    """Keep canonical data-target values while routing translated links by language."""
+    if language == 'en':
+        return html
+    pattern = re.compile(r'(<a class="content-link XURL" href=")(/[^"]*)(")')
+
+    def replace(match):
+        path = match.group(2)
+        if path == f'/{language}' or path.startswith(f'/{language}/'):
+            return match.group(0)
+        return f'{match.group(1)}/{language}{path}{match.group(3)}'
+
+    return pattern.sub(replace, html)
+
+
 def fetch_page_content(page_id):
-    return render_page_blocks(fetch_page_blocks(page_id))
+    html, _layout = render_article_body(fetch_page_blocks(page_id))
+    return html
 
 
 def extract_nested_translations(page_blocks, base_article):
@@ -458,6 +801,11 @@ def extract_nested_translations(page_blocks, base_article):
             )
         child_blocks = fetch_page_blocks(block['id'])
         metadata = parse_translation_metadata(child_blocks, language)
+        content, child_layout = render_article_body(
+            child_blocks,
+            extra_skip=(metadata['metadata_block_id'],),
+        )
+        content = localize_xurl_links(content, language)
         translations.append({
             'id': block['id'],
             'status': base_article['status'],
@@ -469,10 +817,8 @@ def extract_nested_translations(page_blocks, base_article):
             'js': base_article['js'],
             'description': metadata['description'],
             'type': base_article['type'],
-            'content': render_page_blocks(
-                child_blocks,
-                skip_block_ids=(metadata['metadata_block_id'],),
-            ),
+            'content': content,
+            'layout': child_layout or base_article.get('layout'),
         })
         seen_languages.add(language)
     return translations
@@ -522,6 +868,12 @@ def extract_fields(database_content, included_statuses=('publish',)):
             continue
 
         page_blocks = fetch_page_blocks(page["id"])
+        content, layout = render_article_body(page_blocks)
+        navigation = None
+        if slug == 'root':
+            if not layout or layout.get('name') != 'home':
+                raise ValueError('The root page requires a 📐 home layout callout')
+            navigation = extract_home_navigation(page_blocks)
         article = {
             "id": page["id"],
             "status": status,
@@ -533,8 +885,12 @@ def extract_fields(database_content, included_statuses=('publish',)):
             "js": properties["JS"]["select"]["name"] if properties["JS"].get("select") else "0",
             "description": get_rich_text("Description"),
             "type": properties["Type"]["select"]["name"] if properties.get("Type", {}).get("select") else "",
-            "content": render_page_blocks(page_blocks)
+            "content": content,
         }
+        if layout:
+            article["layout"] = layout
+        if navigation:
+            article['navigation'] = navigation
         if "Flags" in properties:
             article["flags"] = get_flags()
         articles.append(article)
@@ -871,6 +1227,60 @@ def update_notion_status(articles):
         except Exception as e:
             print(f"Failed to update status for {article['slug']}: {e}")
 
+def compose_php_page(article):
+    """Wrap rendered Notion HTML in the Cutie component shell for this layout."""
+    layout = article.get('layout') or {}
+    name = (layout.get('name') or '').strip().lower()
+    bottom = (layout.get('bottom') or '').strip().lower()
+    content = article.get('content') or ''
+    if article.get('slug') == 'root':
+        if name != 'home':
+            raise ValueError('The root page requires the home layout')
+        return '\n'.join([
+            "<div id='message'>",
+            "\t<div>",
+            "\t\t<div id='home-message'>",
+            content,
+            "\t\t</div>",
+            "\t\t<div id='profile-image-container' class='message_leave'>",
+            "\t\t\t<a id='profile-image' href='#'><img src='/photo.jpg' alt=\"Author's picture\"></a>",
+            "\t\t</div>",
+            "\t</div>",
+            "</div>",
+            "<div class='center' id='content-body-separator'></div>",
+            "<div class='message_center_div' id='home-menu'>",
+            "\t<section class='home-menu-branch' aria-label=\"<?php echo htmlspecialchars(getComponentLabel(home_menu_branch_slug()), ENT_QUOTES, 'UTF-8') ?>\">",
+            "\t\t<?php home_menu_render_branch(home_menu_branch_slug()); ?>",
+            "\t</section>",
+            "</div>",
+            "<div id='fb_components'>",
+            "\t<?php require('../HTML/Fragment/Component_FB_buttons.php') ?>",
+            "</div>",
+        ])
+    if name == 'me-table':
+        if bottom not in ('nav', 'default'):
+            bottom = 'nav'
+        message_open = "<div id='message' class='center'>"
+        js_include = ""
+    else:
+        if bottom not in ('nav', 'default'):
+            bottom = 'default'
+        message_open = "<div id='message'>"
+        js_include = "<?php require('../JS/Base/page.js'); ?>" if article.get('js') == "1" else ""
+    bottom_file = (
+        'Component_bottom_nav.php' if bottom == 'nav' else 'Component_bottom.php'
+    )
+    lines = [
+        message_open,
+        f"\t{content}",
+        "</div>",
+    ]
+    if js_include:
+        lines.append(js_include)
+    lines.append(f"<?php require('../HTML/Fragment/{bottom_file}') ?>")
+    return '\n'.join(lines)
+
+
 # Transform to PHP with correct directory structure and auto-indent
 def transform_to_php(articles):
     if not output_dir:
@@ -911,15 +1321,7 @@ def transform_to_php(articles):
 
         written_dirs.add(full_file_path)
 
-        js_include = "<?php require('../JS/Base/page.js'); ?>" if article['js'] == "1" else ""
-        php_code_lines = [
-            "<div id='message'>",
-            f"\t{article['content']}",
-            "</div>",
-            js_include,
-            "<?php require('../HTML/Fragment/Component_bottom.php') ?>"
-        ]
-        php_code = '\n'.join(php_code_lines)
+        php_code = compose_php_page(article)
 
         print(f"Writing to: {full_file_path}")
         try:
@@ -927,6 +1329,15 @@ def transform_to_php(articles):
                 f.write(php_code)
         except Exception as e:
             print(f"Error writing to {full_file_path}: {e}")
+
+        if article['slug'] == 'root' and article.get('language', 'en') == 'en':
+            config_dir = os.path.join(output_base, 'Config')
+            os.makedirs(config_dir, exist_ok=True)
+            for key, filename in (('home', 'Home.json'), ('side', 'Menu.json')):
+                target = os.path.join(config_dir, filename)
+                with open(target, 'w', encoding='utf-8', newline='\n') as stream:
+                    json.dump(article['navigation'][key], stream, ensure_ascii=False, indent=2)
+                    stream.write('\n')
 
     # Perform additional updates
     update_id_tsv(articles, output_dir or '.')
@@ -1142,6 +1553,57 @@ def publish_to_bundle(status, slug, bundle_dir, metadata_file, allow_empty=False
     return metadata
 
 
+def sync_home(status, site_project):
+    """Refresh the local homepage source and menu policies from the root row."""
+    global output_dir, project_dir, git_push_enabled, notion_update_enabled
+    if not database_id:
+        raise RuntimeError('NOTION_DATABASE_ID is not set')
+    pages = fetch_page_by_id_title(database_id, 'root', status=status)
+    if len(pages) != 1:
+        raise RuntimeError(f'Expected one root page with Status={status}; found {len(pages)}')
+    articles = extract_fields(pages, included_statuses=(status,))
+    if not articles or articles[0]['slug'] != 'root':
+        raise RuntimeError('NCMS did not extract the root page')
+
+    site_project = Path(site_project).resolve()
+    if not (site_project / 'config' / 'ID.tsv').is_file():
+        raise RuntimeError(f'Not a site project: {site_project}')
+    with tempfile.TemporaryDirectory(prefix='ncms-home-') as temporary:
+        output_dir = temporary
+        project_dir = temporary
+        git_push_enabled = False
+        notion_update_enabled = False
+        transform_to_php(articles)
+        copies = [
+            (Path(temporary) / 'Config' / name, site_project / 'config' / name)
+            for name in ('Home.json', 'Menu.json')
+        ]
+        for article in articles:
+            if article['slug'] != 'root':
+                continue
+            language = article.get('language', 'en')
+            source = Path(temporary) / 'HTML' / 'Component'
+            if language != 'en':
+                source /= language
+            source = source / 'root' / 'index.php'
+            destination = site_project / 'root' / 'HTML' / 'Component'
+            destination = (destination / 'Root.php' if language == 'en'
+                           else destination / language / 'Root' / 'index.php')
+            copies.append((source, destination))
+        for source, destination in copies:
+            if not source.is_file() or source.stat().st_size == 0:
+                raise RuntimeError(f'Missing generated homepage artifact: {source}')
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            staged = destination.with_name(destination.name + '.ncms-tmp')
+            try:
+                shutil.copyfile(source, staged)
+                os.replace(staged, destination)
+            finally:
+                staged.unlink(missing_ok=True)
+            print(f'Synced {destination}')
+    return articles
+
+
 def mark_published(page_id, expected_slug):
     validate_slug(expected_slug)
     page = notion.pages.retrieve(page_id=page_id)
@@ -1206,11 +1668,19 @@ def build_parser():
     )
     mark_parser.add_argument("--page-id", required=True)
     mark_parser.add_argument("--expected-slug", required=True)
+    home_parser = subparsers.add_parser(
+        'sync-home', help='Refresh local homepage components and menu JSON from Notion'
+    )
+    home_parser.add_argument('--status', default='published')
+    home_parser.add_argument('--site-project', required=True)
     return parser
 
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    if args.command == 'sync-home':
+        sync_home(args.status, args.site_project)
+        return 0
     if args.command == "publish":
         publish_to_bundle(
             status=args.status,

@@ -18,6 +18,7 @@ from ncms_fetch import (
     handle_callout, handle_cover_image, handle_content_image,
     handle_link_xurl, handle_raw_php, handle_first_letter_high,
     extract_fields, update_id_tsv, update_translations_tsv, update_sitemap_xml,
+    compose_php_page, parse_page_layout, render_page_blocks,
 )
 from ncms_upload import (
     add_resource_image_blocks, element_to_rich_text, make_callout,
@@ -100,6 +101,10 @@ check("External link target", result, 'target="_blank"')
 
 result = render_rich_text([rt("about", link="/about")])
 check("Relative internal link", result, 'class="content-link XURL"')
+
+result = render_rich_text([rt("Home", link="https://ujnotes.com")])
+check("Homepage XURL target is root", result, 'data-target="root"')
+check("Homepage XURL href is slash", result, 'href="/"')
 
 result = render_rich_text([
     rt("Normal "), rt("bold", bold=True), rt(" end")
@@ -352,6 +357,76 @@ tuples3 = [
 ]
 result3 = wrap_lists(tuples3)
 check("No lists, no wrapping", result3, '<p>Hello</p>')
+
+
+print("\n=== Profile me-table layout ===")
+
+layout_block = {
+    "id": "layout-1",
+    "type": "callout",
+    "callout": {
+        "icon": {"type": "emoji", "emoji": "\U0001f4d0"},
+        "rich_text": [rt("me-table")],
+    },
+}
+layout = parse_page_layout([layout_block])
+check("Layout name", layout['name'], "me-table")
+check("Layout default bottom", layout['bottom'], "nav")
+
+btype, html = handle_callout(layout_block, None)
+check("Layout callout is silent", str(html == ''), "True")
+
+me_blocks = [
+    layout_block,
+    {
+        "id": "h-intro",
+        "type": "heading_3",
+        "heading_3": {"rich_text": [rt("intro")]},
+    },
+    {
+        "id": "p-intro",
+        "type": "paragraph",
+        "paragraph": {"rich_text": [rt("I am Ujjwal Singh")]},
+    },
+    {
+        "id": "h-li",
+        "type": "heading_3",
+        "heading_3": {"rich_text": [rt("linkedIn")]},
+    },
+    {
+        "id": "p-li",
+        "type": "paragraph",
+        "paragraph": {
+            "rich_text": [rt("linkedin.com/in/ujLion", link="https://in.linkedin.com/in/ujlion")]
+        },
+    },
+    {"id": "div-1", "type": "divider", "divider": {}},
+    {
+        "id": "p-disc",
+        "type": "paragraph",
+        "paragraph": {"rich_text": [rt("Ai disclosure.", italic=True)]},
+    },
+]
+me_html = render_page_blocks(me_blocks)
+check("me-table wrapper", me_html, "id='me-table'")
+check("me-table label", me_html, "class='R1'>intro</div>")
+check("me-table value", me_html, "I am Ujjwal Singh")
+check("me-table linkedin badge id", me_html, "id='linkedin-badge'")
+check("me-table does not use h4 labels", str("<h4>" not in me_html), "True")
+check("me-table keeps disclosure after table", me_html, "Ai disclosure.")
+
+php = compose_php_page({
+    'content': me_html,
+    'layout': layout,
+    'js': '1',
+})
+check("me-table message is centered", php, "<div id='message' class='center'>")
+check("me-table uses bottom nav", php, "Component_bottom_nav.php")
+check("me-table skips Cutie page.js include", str("JS/Base/page.js" not in php), "True")
+
+default_php = compose_php_page({'content': '<p>Hi</p>\n', 'js': '0'})
+check("default page still uses Component_bottom", default_php, "Component_bottom.php")
+check("default page is not centered", str("class='center'" not in default_php), "True")
 
 
 print("\n=== Language-Aware Config Generation ===")
